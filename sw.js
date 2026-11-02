@@ -1,9 +1,9 @@
 // Offline support: network first (so updates arrive right away), cache as fallback.
 // GitHub API calls are cross-origin and never touched here.
-const CACHE = 'restock-v2';
+const CACHE = 'restock-v3';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/store.js', 'js/sync.js', 'js/merge.js', 'js/predict.js', 'js/seed.js', 'js/icons.js', 'js/emoji.js',
+  'js/app.js', 'js/store.js', 'js/sync.js', 'js/merge.js', 'js/predict.js', 'js/seed.js', 'js/icons.js', 'js/knowledge.js', 'js/ui.js',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

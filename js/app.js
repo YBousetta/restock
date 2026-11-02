@@ -1,21 +1,20 @@
 import * as S from './store.js';
 import { store } from './store.js';
 import { icons } from './icons.js';
-import { formatDays, formatInterval } from './predict.js';
-import { CATEGORY_ICONS, ICON_CHOICES, guessItemIcon } from './emoji.js';
+import { DAY, formatDays, formatInterval } from './predict.js';
+import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, guessItemIcon, guessCategory } from './knowledge.js';
+import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction } from './ui.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.1.0';
-const esc = (s) =>
-  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const $ = (sel, el = document) => el.querySelector(sel);
+const VERSION = '1.2.0';
 
 const ui = {
   tab: localGet('restock.tab') || 'list',
   query: '',
-  addQuery: '',
   filter: 'all',
-  showComing: true,
+  adding: false,
+  addQuery: '',
+  addedNow: new Set(), // items added during the current add session (stay visible as "added")
   scroll: {},
 };
 
@@ -36,13 +35,16 @@ const TITLES = { list: 'Shopping List', items: 'Items', meals: 'Meals', settings
 
 // ---------- helpers ----------
 
-function catName(id) {
-  return store.data.categories[id]?.name || 'Other';
-}
+const catName = (id) => store.data.categories[id]?.name || 'Other';
+const catIcon = (id) => store.data.categories[id]?.icon || CATEGORY_ICONS[id] || '📦';
+const itemIcon = (item) => item.icon || guessItemIcon(item.name) || catIcon(item.cat);
+const byName = (a, b) => a.item.name.localeCompare(b.item.name);
+const onListKind = (k) => k === 'needed' || k === 'due';
+const listMode = () => store.device.listView || 'grid';
+const meterColor = (l) => (l > 0.5 ? 'var(--green)' : l > 0.2 ? 'var(--orange)' : 'var(--red)');
 
 function groupByCategory(entries) {
-  const order = S.categories();
-  const groups = new Map(order.map((c) => [c.id, []]));
+  const groups = new Map(S.categories().map((c) => [c.id, []]));
   for (const e of entries) {
     const key = groups.has(e.item.cat) ? e.item.cat : 'other';
     if (!groups.has(key)) groups.set(key, []);
@@ -51,19 +53,60 @@ function groupByCategory(entries) {
   return [...groups.entries()].filter(([, list]) => list.length);
 }
 
-const byName = (a, b) => a.item.name.localeCompare(b.item.name);
-
-function catIcon(id) {
-  return store.data.categories[id]?.icon || CATEGORY_ICONS[id] || '📦';
-}
-function itemIcon(item) {
-  return item.icon || guessItemIcon(item.name) || catIcon(item.cat);
-}
 function sectionHeader(cat, extra = '') {
   return `<div class="section-header"><span class="cat-head"><span class="cat-icon">${catIcon(cat)}</span>${esc(catName(cat))}</span>${extra}</div>`;
 }
 
-const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+function freqShort(st, item) {
+  if (item.mode === 'none' || st.interval == null) return 'as needed';
+  const d = st.interval;
+  if (d === 1) return 'daily';
+  if (d === 7) return 'weekly';
+  if (d === 14) return 'every 2 weeks';
+  if (d >= 28 && d <= 31) return 'monthly';
+  if (d % 7 === 0 && d > 7) return `every ${d / 7} weeks`;
+  return `every ${d}d`;
+}
+
+function dueLabel(st) {
+  if (st.daysLeft == null) return 'as needed';
+  if (st.daysLeft < 0) return `<span class="due">Due ${formatDays(st.daysLeft)}</span>`;
+  if (st.daysLeft === 0) return `<span class="due">Due today</span>`;
+  return `<span class="${st.daysLeft <= store.device.lookahead ? 'soon' : ''}">Runs out ${formatDays(st.daysLeft)}</span>`;
+}
+
+const fmtDate = (t) => new Date(t).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+function fmtAgo(t) {
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return fmtDate(t);
+}
+
+// Fraction of stock estimated left (1 = just bought, 0 = should be out).
+function stockLevel(st) {
+  if (st.interval == null || st.dueAt == null) return null;
+  return Math.min(1, Math.max(0, (st.dueAt - Date.now()) / (st.interval * DAY)));
+}
+
+function computeList() {
+  const all = S.items().map((item) => ({ item, st: S.status(item) }));
+  const toBuy = all.filter((e) => onListKind(e.st.kind));
+  const coming = all.filter((e) => e.st.kind === 'soon').sort((a, b) => a.st.daysLeft - b.st.daysLeft || byName(a, b));
+  const seen = new Set();
+  const bought = [];
+  for (const p of S.boughtToday().sort((a, b) => b.at - a.at)) {
+    const item = store.data.items[p.itemId];
+    if (!item || item.deleted || seen.has(p.itemId)) continue;
+    seen.add(p.itemId);
+    if (toBuy.some((e) => e.item.id === p.itemId)) continue;
+    bought.push({ item, p });
+  }
+  return { all, toBuy, coming, bought };
+}
+
+const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 // Catalog search: name starts with query > a word starts with it > contains it.
 function searchItems(q, limit = 8) {
   const n = norm(q.trim());
@@ -83,207 +126,199 @@ function searchItems(q, limit = 8) {
 
 const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-
-function shortDue(st) {
-  if (st.kind === 'needed') return '';
-  if (st.daysLeft == null) return '';
-  if (st.daysLeft === 0) return 'today';
-  if (st.daysLeft < 0) return `${-st.daysLeft}d late`;
-  return `${st.daysLeft}d`;
+function browserName() {
+  const ua = navigator.userAgent;
+  if (/CriOS/.test(ua)) return 'Chrome';
+  if (/FxiOS/.test(ua)) return 'Firefox';
+  if (/EdgiOS/.test(ua)) return 'Edge';
+  return 'Safari';
 }
-
-function reasonText(st, item) {
-  if (st.kind === 'needed') return item.mode === 'none' ? 'On list' : `On list · ${freqText(st, item)}`;
-  return dueLabel(st);
-}
-
-function dueLabel(st) {
-  if (st.daysLeft == null) return 'as needed';
-  if (st.daysLeft < 0) return `<span class="due">Due ${formatDays(st.daysLeft)}</span>`;
-  if (st.daysLeft === 0) return `<span class="due">Due today</span>`;
-  return `<span class="${st.daysLeft <= store.device.lookahead ? 'soon' : ''}">Runs out ${formatDays(st.daysLeft)}</span>`;
-}
-
-function freqText(st, item) {
-  if (item.mode === 'none') return 'as needed';
-  if (item.mode === 'fixed') return formatInterval(st.interval);
-  return st.samples ? `${formatInterval(st.interval)} · learned` : `${formatInterval(st.interval)} · guess`;
-}
-
-function fmtDate(t) {
-  return new Date(t).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
-}
-function fmtAgo(t) {
-  const s = Math.round((Date.now() - t) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return fmtDate(t);
-}
-
-function computeList() {
-  const all = S.items().map((item) => ({ item, st: S.status(item) }));
-  const toBuy = all.filter((e) => e.st.kind === 'needed' || e.st.kind === 'due');
-  const coming = all.filter((e) => e.st.kind === 'soon').sort((a, b) => a.st.daysLeft - b.st.daysLeft || byName(a, b));
-  const seen = new Set();
-  const bought = [];
-  for (const p of S.boughtToday().sort((a, b) => b.at - a.at)) {
-    const item = store.data.items[p.itemId];
-    if (!item || item.deleted || seen.has(p.itemId)) continue;
-    seen.add(p.itemId);
-    if (toBuy.some((e) => e.item.id === p.itemId)) continue;
-    bought.push({ item, p });
-  }
-  return { all, toBuy, coming, bought };
-}
-
-// ---------- views ----------
 
 function syncBadge() {
-  const st = syncState.status;
-  if (st === 'off') return '';
-  const map = {
-    ok: ['ok', 'Synced'],
-    syncing: ['soon', 'Syncing'],
-    offline: ['none', 'Offline'],
-    error: ['due', 'Sync error'],
-  };
-  const [cls, label] = map[st] || ['none', st];
+  const map = { ok: ['ok', 'Synced'], syncing: ['soon', 'Syncing'], offline: ['none', 'Offline'], error: ['due', 'Sync error'] };
+  const [cls, label] = map[syncState.status] || ['none', 'Off'];
   return `<span class="sync-badge"><span class="dot ${cls}"></span>${label}</span>`;
 }
 
-function addBar() {
-  const q = ui.addQuery;
-  let html = `<form class="search addbar" data-form="quickadd">${icons.search}<input id="quickadd" type="text" placeholder="Add from your items" value="${esc(q)}" autocomplete="off" autocorrect="off" enterkeyhint="done">
-    ${q ? `<button type="button" class="clear" data-act="clearadd" aria-label="Clear">✕</button>` : ''}</form>`;
-  if (!q.trim()) return html;
+// ---------- shopping list ----------
+
+function addPanel() {
+  const q = ui.addQuery.trim();
+  const added = (id) => ui.addedNow.has(id) || onListKind(S.status(store.data.items[id]).kind);
+  const chip = (item) =>
+    `<button class="chip-item ${added(item.id) ? 'added' : ''}" data-act="quick" data-id="${item.id}" data-keepfocus>
+      <span>${itemIcon(item)}</span>${esc(item.name)}${added(item.id) ? '<b>✓</b>' : ''}</button>`;
+
+  if (!q) {
+    const all = S.items().map((item) => ({ item, st: S.status(item) }));
+    const low = all
+      .filter((e) => e.st.kind === 'soon' || (ui.addedNow.has(e.item.id) && e.st.daysLeft != null && e.st.daysLeft <= store.device.lookahead))
+      .sort((a, b) => (a.st.daysLeft ?? 99) - (b.st.daysLeft ?? 99));
+    const lowIds = new Set(low.map((e) => e.item.id));
+    const counts = S.purchaseCounts();
+    const staples = all
+      .filter((e) => e.item.mode !== 'none' && !lowIds.has(e.item.id) && (!onListKind(e.st.kind) || ui.addedNow.has(e.item.id)))
+      .sort((a, b) => (counts[b.item.id] || 0) - (counts[a.item.id] || 0) || a.st.interval - b.st.interval || byName(a, b))
+      .slice(0, 14);
+    let html = '';
+    if (low.length) html += `<div class="section-header">Running low</div><div class="chip-wrap">${low.map((e) => chip(e.item)).join('')}</div>`;
+    html += `<div class="section-header">Your staples</div><div class="chip-wrap">${staples.map((e) => chip(e.item)).join('')}</div>
+      <p class="section-footer">Tap to add. Type to search all ${S.items().length} items or create a new one.</p>`;
+    return html;
+  }
+
   const results = searchItems(q);
-  html += `<div class="group suggestions">`;
+  let html = `<div class="group suggestions">`;
   for (const item of results) {
     const st = S.status(item);
-    const onList = st.kind === 'needed' || st.kind === 'due';
-    html += `<button class="row tappable" data-act="${onList ? 'noop' : 'addsug'}" data-id="${item.id}" data-keepfocus>
+    const isAdded = added(item.id);
+    html += `<button class="row tappable" data-act="quick" data-id="${item.id}" data-keepfocus>
       <span class="item-icon">${itemIcon(item)}</span>
-      <div class="body"><div class="title">${esc(item.name)}</div><div class="sub">${esc(catName(item.cat))} · ${onList ? 'already on list' : st.daysLeft == null ? 'as needed' : dueLabel(st)}</div></div>
-      <span class="sug-add" style="color:${onList ? 'var(--tint)' : 'var(--label3)'}">${onList ? icons.checkCircle : icons.plusCircle}</span></button>`;
+      <div class="body"><div class="title">${esc(item.name)}</div><div class="sub">${catIcon(item.cat)} ${esc(catName(item.cat))} · ${freqShort(st, item)}</div></div>
+      <span class="sug-add ${isAdded ? 'on' : ''}">${isAdded ? icons.checkCircle : icons.plusCircle}</span></button>`;
   }
-  if (!results.length) {
-    html += `<div class="row"><div class="body"><div class="title" style="color:var(--label2)">No item called “${esc(q.trim())}”</div></div></div>`;
+  if (!S.findItemByName(q)) {
+    const gc = guessCategory(q, S.items()) || 'other';
+    html += `<button class="row tappable create-row" data-act="createitem" data-keepfocus>
+      <span class="item-icon new">${icons.plus}</span>
+      <div class="body"><div class="title">Create “${esc(q)}”</div><div class="sub">New item · ${catIcon(gc)} ${esc(catName(gc))}</div></div></button>`;
   }
-  html += `<button class="row tappable action" data-act="createitem" data-keepfocus><span class="item-icon">${icons.plus}</span><div class="body">Create “${esc(q.trim())}” as a new item</div></button></div>`;
-  return html;
-}
-
-function buyRow(item, st, compact) {
-  if (compact) {
-    return `<div class="row has-check compact">
-      <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
-      <button class="body" data-act="rowmenu" data-id="${item.id}"><div class="title">${esc(item.name)}</div></button>
-      <span class="detail small ${st.daysLeft != null && st.daysLeft <= 0 && st.kind !== 'needed' ? 'due' : ''}">${shortDue(st)}</span></div>`;
-  }
-  return `<div class="row has-check">
-    <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
-    <button class="body" data-act="rowmenu" data-id="${item.id}">
-      <div class="title">${esc(item.name)}</div>
-      <div class="sub">${reasonText(st, item)}</div>
-    </button></div>`;
+  return html + `</div>`;
 }
 
 function buyTile(item, st) {
-  const late = st.kind === 'due' && st.daysLeft < 0;
-  return `<button class="tile" data-act="buy" data-long="rowmenu" data-id="${item.id}">
+  const late = st.daysLeft != null && st.daysLeft <= 0;
+  return `<button class="tile ${late ? 'late' : ''}" data-act="tilebuy" data-long="detail" data-id="${item.id}">
+    ${late ? '<span class="tile-dot"></span>' : ''}
     <span class="tile-icon">${itemIcon(item)}</span>
     <span class="tile-name">${esc(item.name)}</span>
-    <span class="tile-sub ${late || st.daysLeft === 0 ? 'due' : ''}">${st.kind === 'needed' ? 'on list' : st.daysLeft === 0 ? 'due today' : late ? `${-st.daysLeft}d late` : ''}</span>
+    <span class="tile-freq">${freqShort(st, item)}</span>
+    <span class="tile-done">${icons.check}</span>
   </button>`;
+}
+
+function buyRow(item, st, compact) {
+  return `<div class="row has-check ${compact ? 'compact' : ''}">
+    <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
+    ${compact ? '' : `<span class="item-icon">${itemIcon(item)}</span>`}
+    <button class="body" data-act="detail" data-id="${item.id}">
+      <div class="title">${esc(item.name)}</div>
+      ${compact ? '' : `<div class="sub">${freqShort(st, item)}${st.kind === 'due' ? ' · ' + dueLabel(st) : ''}</div>`}
+    </button>
+    ${compact ? `<span class="detail small">${freqShort(st, item)}</span>` : ''}</div>`;
+}
+
+function a2hsCard() {
+  if (!isIOS() || isStandalone() || localGet('restock.a2hsDismissed')) return '';
+  const b = browserName();
+  const where = b === 'Safari' ? 'in Safari' : `in ${b}'s address bar`;
+  return `<div class="card a2hs"><h4>Open Restock full screen</h4>
+    <ol class="steps"><li>Tap <b>Share</b> ${icons.share.replace('<svg', '<svg width="15" height="15" style="vertical-align:-2px"')} ${where}</li>
+    <li>Tap <b>Add to Home Screen</b>, keep <b>Open as Web App</b> on</li>
+    <li>Open <b>Restock</b> from your Home Screen</li></ol>
+    <p>The Home Screen app keeps its own data, so set up sync there.</p>
+    <button class="link-btn" data-act="dismissa2hs">Dismiss</button></div>`;
 }
 
 function listView() {
   const { toBuy, coming, bought } = computeList();
-  const mode = store.device.listView || 'list';
+  const mode = listMode();
   const compact = mode === 'compact';
   let html = `<h1 class="large-title">Shopping List</h1>
-    <p class="subtitle">${toBuy.length ? `${toBuy.length} to buy` : 'Nothing due'} ${syncState.status !== 'off' ? ' · ' + syncBadge() : ''}</p>`;
+    <p class="subtitle">${toBuy.length ? `${toBuy.length} to buy` : 'Nothing due'}${syncState.status !== 'off' ? ' · ' + syncBadge() : ''}</p>
+    ${ui.adding ? '' : a2hsCard()}
+    <div class="addbar-wrap ${ui.adding ? 'active' : ''}">
+      <label class="search addbar">${icons.search}<input id="quickadd" type="text" placeholder="Add an item" value="${esc(ui.addQuery)}" autocomplete="off" autocorrect="off" enterkeyhint="done"></label>
+      ${ui.adding ? `<button class="addbar-done" data-act="adddone">Done</button>` : ''}
+    </div>`;
 
-  if (isIOS() && !isStandalone() && !localGet('restock.a2hsDismissed')) {
-    html += `<div class="card a2hs"><h4>Open Restock full screen</h4>
-      <ol class="steps"><li>Tap <b>Share</b> ${icons.share.replace('<svg', '<svg width="16" height="16" style="vertical-align:-2px"')} in Safari</li>
-      <li>Tap <b>Add to Home Screen</b> and keep <b>Open as Web App</b> on</li>
-      <li>Open <b>Restock</b> from your Home Screen</li></ol>
-      <p style="margin:0;font-size:13px">Safari doesn't let websites hide its own bars, so the full-screen app lives on your Home Screen. Set up sync from there: it keeps its own data, separate from Safari.</p>
-      <button class="nav-btn" data-act="dismissa2hs" style="margin:4px auto 0;display:flex;color:var(--label2);font-size:15px">Dismiss</button></div>`;
-  }
-
-  html += addBar();
-  if (ui.addQuery.trim()) return html; // while searching, suggestions take over the screen
+  if (ui.adding) return html + `<div id="addpanel">${addPanel()}</div>`;
 
   if (!toBuy.length && !bought.length) {
     const next = S.items()
       .map((item) => ({ item, st: S.status(item) }))
       .filter((e) => e.st.daysLeft != null)
       .sort((a, b) => a.st.daysLeft - b.st.daysLeft)[0];
-    html += `<div class="empty"><div class="big">✓</div><h3>All stocked up</h3>
-      <p>${next ? `Next up: <b>${esc(next.item.name)}</b>, ${formatDays(next.st.daysLeft)}.` : 'Search above to add items.'}</p></div>`;
+    html += `<div class="empty"><div class="big">🧺</div><h3>All stocked up</h3>
+      <p>${next ? `Next up: <b>${esc(next.item.name)}</b>, ${formatDays(next.st.daysLeft)}.` : 'Tap “Add an item” to start.'}</p></div>`;
   }
 
   if (mode === 'grid' && toBuy.length) {
-    // One continuous grid in aisle order: denser than splitting tiles per category.
     const tiles = groupByCategory(toBuy).flatMap(([, list]) => list.sort(byName));
-    html += `<div class="grid" style="margin-top:14px">${tiles.map((e) => buyTile(e.item, e.st)).join('')}</div>
-      <p class="section-footer">In aisle order · tap to check off · hold for options</p>`;
+    html += `<div class="grid">${tiles.map((e) => buyTile(e.item, e.st)).join('')}</div>
+      <p class="section-footer center">Tap when it's in the cart · hold for details</p>`;
   } else {
     for (const [cat, list] of groupByCategory(toBuy)) {
-      html += sectionHeader(cat, compact ? `<span class="count">${list.length}</span>` : '');
+      html += sectionHeader(cat, `<span class="count">${list.length}</span>`);
       html += `<div class="group">${list.sort(byName).map((e) => buyRow(e.item, e.st, compact)).join('')}</div>`;
     }
   }
 
   if (coming.length) {
-    html += `<div class="section-header"><span>Coming up · next ${store.device.lookahead} day${store.device.lookahead > 1 ? 's' : ''}</span>
+    html += `<div class="section-header"><span>Coming up · ${store.device.lookahead} day${store.device.lookahead > 1 ? 's' : ''}</span>
       <button data-act="addcoming">Add all</button></div><div class="group">`;
     for (const { item, st } of coming) {
       html += `<div class="row ${compact ? 'compact' : ''}">
         <span class="item-icon ${compact ? 'sm' : ''}">${itemIcon(item)}</span>
-        <button class="body" data-act="rowmenu" data-id="${item.id}"><div class="title">${esc(item.name)}</div>
-          ${compact ? '' : `<div class="sub">${freqText(st, item)}</div>`}</button>
-        <span class="detail ${compact ? 'small' : ''}">${formatDays(st.daysLeft)}</span>
-        <button class="nav-btn" data-act="need" data-id="${item.id}" aria-label="Add to list">${icons.plusCircle}</button></div>`;
-    }
-    html += `</div>${compact ? '' : '<p class="section-footer">Based on how often you buy them. Add them now to save a trip.</p>'}`;
-  }
-
-  if (bought.length) {
-    html += `<div class="section-header">Bought today</div><div class="group">`;
-    for (const { item, p } of bought) {
-      const time = new Date(p.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-      html += `<div class="row has-check checked ${compact ? 'compact' : ''}">
-        <button class="check-hit" data-act="undo" data-id="${p.id}" aria-label="Undo"><span class="check">${icons.check}</span></button>
-        <div class="body"><div class="title">${esc(item.name)}</div>
-        ${compact ? '' : `<div class="sub">${p.by ? esc(p.by) + ' · ' : ''}${time}</div>`}</div>
-        ${compact ? `<span class="detail small">${time}</span>` : ''}</div>`;
+        <button class="body" data-act="detail" data-id="${item.id}"><div class="title">${esc(item.name)}</div>
+          ${compact ? '' : `<div class="sub">${freqShort(st, item)}</div>`}</button>
+        <span class="detail small">${formatDays(st.daysLeft)}</span>
+        <button class="icon-btn" data-act="need" data-id="${item.id}" aria-label="Add to list">${icons.plusCircle}</button></div>`;
     }
     html += `</div>`;
   }
 
-  if (syncState.status === 'off' && !store.device.dismissedSyncCard) {
-    html += `<div class="card"><h4>Share with your partner</h4>
-      <p>Connect sync so you both see the same list.</p>
-      <div class="btn-row" style="margin-top:0"><button class="btn secondary" data-act="join">I have a code</button>
-      <button class="btn secondary" data-act="tab" data-tab="settings">Set up</button></div>
-      <button class="nav-btn" data-act="dismisssync" style="margin:6px auto 0;display:flex;color:var(--label2);font-size:15px">Not now</button></div>`;
+  if (bought.length) {
+    html += `<div class="section-header">In the cart today</div><div class="group">`;
+    for (const { item, p } of bought) {
+      const time = new Date(p.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      html += `<div class="row has-check checked compact">
+        <button class="check-hit" data-act="undo" data-id="${p.id}" aria-label="Undo"><span class="check">${icons.check}</span></button>
+        <div class="body"><div class="title">${itemIcon(item)} ${esc(item.name)}</div></div>
+        <span class="detail small">${p.by ? esc(p.by) + ' · ' : ''}${time}</span></div>`;
+    }
+    html += `</div>`;
   }
   return html;
 }
 
-function itemsView() {
-  const q = ui.query.trim().toLowerCase();
+// ---------- items ----------
+
+function itemsResults() {
+  const q = norm(ui.query.trim());
   let entries = S.items().map((item) => ({ item, st: S.status(item) }));
   if (ui.filter === 'regular') entries = entries.filter((e) => e.item.mode !== 'none');
   if (ui.filter === 'asneeded') entries = entries.filter((e) => e.item.mode === 'none');
-  if (q) entries = entries.filter((e) => e.item.name.toLowerCase().includes(q) || catName(e.item.cat).toLowerCase().includes(q));
+  if (q) entries = entries.filter((e) => norm(e.item.name).includes(q) || norm(catName(e.item.cat)).includes(q));
 
-  let html = `<h1 class="large-title">Items</h1>
-    <div class="search">${icons.search}<input id="itemsearch" type="search" placeholder="Search" value="${esc(ui.query)}" autocomplete="off"></div>
+  if (!entries.length) {
+    return `<div class="empty"><h3>No items</h3><p>${q ? `Nothing matches “${esc(ui.query)}”.` : ''}</p>
+      ${q ? `<button class="btn secondary" data-act="newitem" data-name="${esc(ui.query)}">Create “${esc(ui.query)}”</button>` : ''}</div>`;
+  }
+  let html = '';
+  for (const [cat, list] of groupByCategory(entries)) {
+    html += sectionHeader(cat, `<span class="count">${list.length}</span>`) + `<div class="group">`;
+    for (const { item, st } of list.sort(byName)) {
+      const on = onListKind(st.kind);
+      const lvl = stockLevel(st);
+      html += `<div class="row">
+        <span class="item-icon">${itemIcon(item)}</span>
+        <button class="body" data-act="detail" data-id="${item.id}">
+          <div class="title">${esc(item.name)}</div>
+          <div class="sub">${freqShort(st, item)}${st.daysLeft != null && st.kind !== 'needed' ? ' · ' + dueLabel(st) : ''}</div>
+          ${lvl != null && !on ? `<div class="mini-meter"><div style="width:${Math.round(lvl * 100)}%;background:${meterColor(lvl)}"></div></div>` : ''}
+        </button>
+        <button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+  return html + `<p class="section-footer center">${entries.length} items</p>`;
+}
+
+function itemsView() {
+  return `<h1 class="large-title">Items</h1>
+    <label class="search">${icons.search}<input id="itemsearch" type="text" placeholder="Search items" value="${esc(ui.query)}" autocomplete="off" autocorrect="off"></label>
     <div class="segmented" style="margin:10px 0 0">
       ${[
         ['all', 'All'],
@@ -292,424 +327,821 @@ function itemsView() {
       ]
         .map(([k, l]) => `<button class="${ui.filter === k ? 'on' : ''}" data-act="filter" data-f="${k}">${l}</button>`)
         .join('')}
-    </div>`;
-
-  if (!entries.length) {
-    html += `<div class="empty"><h3>No items</h3><p>${q ? `Nothing matches “${esc(ui.query)}”.` : ''}</p>
-      ${q ? `<button class="btn secondary" data-act="newitem" data-name="${esc(ui.query)}">Add “${esc(ui.query)}”</button>` : ''}</div>`;
-  }
-
-  for (const [cat, list] of groupByCategory(entries)) {
-    html += sectionHeader(cat) + `<div class="group">`;
-    for (const { item, st } of list.sort(byName)) {
-      const onList = st.kind === 'needed' || st.kind === 'due';
-      html += `<div class="row">
-        <span class="dot ${st.kind}"></span>
-        <button class="body" data-act="edit" data-id="${item.id}">
-          <div class="title">${esc(item.name)}</div>
-          <div class="sub">${freqText(st, item)}${st.daysLeft != null && st.kind !== 'needed' ? ' · ' + dueLabel(st) : ''}</div>
-        </button>
-        <button class="nav-btn" data-act="${onList ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${onList ? 'On list' : 'Add to list'}" style="color:${onList ? 'var(--tint)' : 'var(--label3)'}">${onList ? icons.checkCircle : icons.plusCircle}</button>
-      </div>`;
-    }
-    html += `</div>`;
-  }
-  html += `<p class="section-footer" style="text-align:center;margin-top:20px">${entries.length} items · <span class="dot ok" style="display:inline-block;width:8px;height:8px"></span> stocked <span class="dot soon" style="display:inline-block;width:8px;height:8px"></span> soon <span class="dot due" style="display:inline-block;width:8px;height:8px"></span> buy</p>`;
-  return html;
+    </div>
+    <div id="itemsresults">${itemsResults()}</div>`;
 }
+
+// ---------- meals ----------
 
 function mealsView() {
   const meals = S.live(store.data.meals).sort((a, b) => a.name.localeCompare(b.name));
   let html = `<h1 class="large-title">Meals</h1><p class="subtitle">Planning a meal? Add what's missing in one tap.</p>`;
-  if (!meals.length) html += `<div class="empty"><h3>No meals yet</h3><p>Tap + to add your usual meals.</p></div>`;
-  else {
-    html += `<div class="group">`;
-    for (const m of meals) {
-      const ings = m.items.map((id) => store.data.items[id]).filter((i) => i && !i.deleted);
-      const missing = ings.filter((i) => ['needed', 'due', 'soon'].includes(S.status(i).kind)).length;
-      html += `<button class="row tappable" data-act="meal" data-id="${m.id}">
-        <div class="body"><div class="title">${esc(m.name)}</div>
-        <div class="sub">${ings.map((i) => esc(i.name)).join(', ')}</div></div>
-        ${missing ? `<span class="pill orange">${missing}</span>` : ''}
-        <span class="chev">${icons.chevron}</span></button>`;
-    }
-    html += `</div>`;
+  if (!meals.length) return html + `<div class="empty"><div class="big">🍽️</div><h3>No meals yet</h3><p>Tap + to add your usual meals.</p></div>`;
+  html += `<div class="meal-list">`;
+  for (const m of meals) {
+    const ings = m.items.map((id) => store.data.items[id]).filter((i) => i && !i.deleted);
+    const missing = ings.filter((i) => ['needed', 'due', 'soon'].includes(S.status(i).kind)).length;
+    html += `<button class="meal-card" data-act="meal" data-id="${m.id}">
+      <div class="meal-icons">${ings
+        .slice(0, 6)
+        .map((i) => `<span>${itemIcon(i)}</span>`)
+        .join('')}</div>
+      <div class="meal-name">${esc(m.name)}</div>
+      <div class="meal-sub">${ings.length} ingredients${missing ? ` · <span class="soon">${missing} running low</span>` : ''}</div>
+    </button>`;
   }
-  return html;
+  return html + `</div>`;
+}
+
+// ---------- settings ----------
+
+function sRow(icon, color, title, detail, act) {
+  return `<button class="row tappable srow" data-act="${act}">
+    <span class="sicon" style="background:${color}">${icon}</span>
+    <div class="body"><div class="title">${title}</div></div>
+    ${detail ? `<span class="detail">${detail}</span>` : ''}
+    <span class="chev">${icons.chevron}</span></button>`;
 }
 
 function settingsView() {
   const d = store.device;
-  const cats = S.categories();
-  let html = `<h1 class="large-title">Settings</h1>
-    <div class="section-header">This phone</div>
-    <div class="group">
-      <label class="row"><span class="label">Your name</span><input id="devname" type="text" placeholder="e.g. Youssef" value="${esc(d.name)}" style="text-align:right" autocomplete="off"></label>
-      <div class="row"><div class="body"><div class="title">Look ahead</div><div class="sub">“Coming up” shows items running out within ${d.lookahead} day${d.lookahead > 1 ? 's' : ''}</div></div>
-        <div class="stepper"><button data-act="look" data-d="-1">−</button><button data-act="look" data-d="1">+</button></div></div>
+  const viewLabel = { grid: 'Grid', list: 'List', compact: 'Compact' }[listMode()];
+  const purchases = S.live(store.data.purchases).length;
+  return `<h1 class="large-title">Settings</h1>
+    <div class="profile-card">
+      <div class="avatar">${d.name ? esc(d.name.trim()[0].toUpperCase()) : '🙂'}</div>
+      <div class="pc-body"><input id="devname" type="text" placeholder="Your name" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done">
+        <div class="sub">Shown on items you check off</div></div>
     </div>
-    <p class="section-footer">Your name shows next to items you check off.</p>
 
-    <div class="section-header">Sync with partner</div>`;
+    <div class="section-header">Shopping</div>
+    <div class="group">
+      ${sRow(icons.viewGrid, '#5e5ce6', 'List style', viewLabel, 'viewmenu')}
+      <div class="row srow"><span class="sicon" style="background:#ff9f0a">${icons.clock}</span>
+        <div class="body"><div class="title">Look ahead</div></div>
+        <span class="detail">${d.lookahead} day${d.lookahead > 1 ? 's' : ''}</span>
+        <div class="stepper"><button data-act="look" data-d="-1" aria-label="Less">−</button><button data-act="look" data-d="1" aria-label="More">+</button></div></div>
+      ${sRow(icons.aisle, '#0a84ff', 'Aisle order', `${S.categories().length} categories`, 'aisles')}
+    </div>
 
-  if (!d.sync) {
-    html += `<div class="group">
-      <button class="row tappable action" data-act="join"><div class="body">Join with invite code</div></button>
-      <button class="row tappable action" data-act="setup"><div class="body">Set up sync (first phone)</div></button>
-    </div><p class="section-footer">Not connected. Data stays on this phone only.</p>`;
-  } else {
-    html += `<div class="group">
-      <div class="row"><div class="body"><div class="title">Status</div></div><span class="detail">${syncBadge()}</span></div>
-      <div class="row"><div class="body"><div class="title">Last sync</div></div><span class="detail">${syncState.lastSync ? fmtAgo(syncState.lastSync) : '—'}</span></div>
-      <div class="row"><div class="body"><div class="title">Repository</div></div><span class="detail">${esc(d.sync.owner)}/${esc(d.sync.repo)}</span></div>
-      <button class="row tappable action" data-act="syncnow"><div class="body">Sync now</div></button>
-      <button class="row tappable action" data-act="invite"><div class="body">Invite partner</div></button>
-      <button class="row tappable" data-act="disconnect" style="color:var(--red)"><div class="body">Disconnect</div></button>
-    </div>${syncState.error ? `<p class="section-footer" style="color:var(--red)">${esc(syncState.error)}</p>` : ''}`;
-  }
-
-  html += `<div class="section-header"><span>Aisle order</span><button data-act="addcat">Add</button></div><div class="group">`;
-  cats.forEach((c, i) => {
-    html += `<div class="row"><span class="cat-icon lg">${catIcon(c.id)}</span><button class="body" data-act="renamecat" data-id="${c.id}"><div class="title">${esc(c.name)}</div></button>
-      <button class="nav-btn" data-act="catup" data-id="${c.id}" ${i === 0 ? 'disabled style="opacity:.25"' : ''} aria-label="Move up">${icons.up}</button>
-      <button class="nav-btn" data-act="catdown" data-id="${c.id}" ${i === cats.length - 1 ? 'disabled style="opacity:.25"' : ''} aria-label="Move down">${icons.down}</button></div>`;
-  });
-  html += `</div><p class="section-footer">Order categories the way you walk through your supermarket. Tap a name to rename it or change its icon.</p>
+    <div class="section-header">Household</div>
+    <div class="group">${sRow(icons.people, '#30d158', 'Partner sync', d.sync ? syncBadge() : 'Off', 'sync')}</div>
 
     <div class="section-header">Data</div>
-    <div class="group">
-      <button class="row tappable action" data-act="export"><div class="body">Export backup</div></button>
-      <label class="row tappable action"><div class="body">Import backup</div><input type="file" accept="application/json,.json" id="importfile" hidden></label>
-      <button class="row tappable" data-act="reset" style="color:var(--red)"><div class="body">Reset to starting list</div></button>
-    </div>
-    <p class="section-footer" style="text-align:center;margin-top:24px">Restock ${VERSION}</p>`;
-  return html;
+    <div class="group">${sRow(icons.archive, '#8e8e93', 'Backup & restore', '', 'data')}</div>
+
+    <p class="footer-meta">Restock ${VERSION}<br>${S.items().length} items · ${purchases} purchase${purchases === 1 ? '' : 's'} logged</p>`;
 }
 
 // ---------- render ----------
 
 const app = document.getElementById('app');
+const tabbar = document.getElementById('tabbar');
 
 function render() {
+  // Keep a focused text field alive across re-renders (no keyboard flicker).
   const active = document.activeElement;
-  const focus = active && active.id && app.contains(active) ? { id: active.id, start: active.selectionStart, end: active.selectionEnd, value: active.value } : null;
+  const keep = active && active.id && app.contains(active) && active.tagName === 'INPUT' ? active : null;
 
   const view = { list: listView, items: itemsView, meals: mealsView, settings: settingsView }[ui.tab]();
-  const viewIcon = { list: icons.viewList, grid: icons.viewGrid, compact: icons.viewCompact }[store.device.listView || 'list'];
+  const viewIcon = { list: icons.viewList, grid: icons.viewGrid, compact: icons.viewCompact }[listMode()];
   const right =
     ui.tab === 'list'
-      ? `<button class="nav-btn" data-act="viewmenu" aria-label="Change view">${viewIcon}</button>`
+      ? `<button class="nav-btn" data-act="viewmenu" aria-label="List style">${viewIcon}</button>`
       : ui.tab === 'items'
-      ? `<button class="nav-btn" data-act="newitem" aria-label="New item">${icons.plus}</button>`
-      : ui.tab === 'meals'
-        ? `<button class="nav-btn" data-act="newmeal" aria-label="New meal">${icons.plus}</button>`
-        : '';
+        ? `<button class="nav-btn" data-act="newitem" aria-label="New item">${icons.plus}</button>`
+        : ui.tab === 'meals'
+          ? `<button class="nav-btn" data-act="newmeal" aria-label="New meal">${icons.plus}</button>`
+          : '';
   const badge = computeList().toBuy.length;
+  const tabs = [
+    ['list', 'Shopping list', icons.cart],
+    ['items', 'Items', icons.noteList],
+    ['meals', 'Meals', icons.meals],
+    ['settings', 'Settings', icons.gear],
+  ];
   app.innerHTML = `
     <header class="navbar ${window.scrollY > 30 ? 'scrolled' : ''}"><div class="left"></div><div class="small-title">${TITLES[ui.tab]}</div><div class="right">${right}</div></header>
     <main class="view">${view}</main>
-    <nav class="tabbar">
-      ${[
-        ['list', 'List', icons.list],
-        ['items', 'Items', icons.items],
-        ['meals', 'Meals', icons.meals],
-        ['settings', 'Settings', icons.gear],
-      ]
-        .map(
-          ([k, l, ic]) =>
-            `<button class="tab ${ui.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}">${ic}<span>${l}</span>${k === 'list' && badge ? `<span class="badge">${badge}</span>` : ''}</button>`,
-        )
-        .join('')}
-    </nav>`;
+    `;
+  tabbar.innerHTML = tabs
+    .map(
+      ([k, l, ic]) =>
+        `<button class="tab ${ui.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}" aria-label="${l}">${ic}${k === 'list' && badge ? `<span class="badge">${badge}</span>` : ''}</button>`,
+    )
+    .join('');
 
-  if (focus) {
-    const el = document.getElementById(focus.id);
-    if (el) {
-      el.focus({ preventScroll: true });
-      try {
-        const len = el.value.length;
-        if (el.value === focus.value) el.setSelectionRange(focus.start, focus.end);
-        else el.setSelectionRange(len, len);
-      } catch {}
+  if (keep) {
+    const fresh = document.getElementById(keep.id);
+    if (fresh) {
+      fresh.replaceWith(keep);
+      keep.focus({ preventScroll: true });
     }
   }
 }
 
 let raf = 0;
-function scheduleRender() {
+const scheduleRender = () => {
   cancelAnimationFrame(raf);
   raf = requestAnimationFrame(render);
-}
+};
 
-window.addEventListener(
-  'scroll',
-  () => {
-    const nav = $('.navbar');
-    if (nav) nav.classList.toggle('scrolled', window.scrollY > 30);
-  },
-  { passive: true },
-);
+window.addEventListener('scroll', () => $('.navbar')?.classList.toggle('scrolled', window.scrollY > 30), { passive: true });
 
 function switchTab(tab) {
   ui.scroll[ui.tab] = window.scrollY;
+  if (tab !== 'list') exitAdding(false);
   ui.tab = tab;
   localSet('restock.tab', tab);
   render();
   window.scrollTo(0, ui.scroll[tab] || 0);
 }
 
-// ---------- toast / sheets ----------
+function refreshAddPanel() {
+  const panel = $('#addpanel');
+  if (panel) panel.innerHTML = addPanel();
+  else render();
+}
 
-let toastTimer;
-function toast(msg, undo) {
-  let el = $('.toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.className = 'toast';
-    document.body.appendChild(el);
+function exitAdding(rerender = true) {
+  if (!ui.adding) return;
+  const n = [...ui.addedNow].filter((id) => onListKind(S.status(store.data.items[id]).kind)).length;
+  ui.adding = false;
+  ui.addQuery = '';
+  ui.addedNow.clear();
+  document.activeElement?.blur();
+  if (rerender) {
+    render();
+    if (n) toast(`${n} item${n > 1 ? 's' : ''} added to your list`);
   }
-  el.innerHTML = `<span>${esc(msg)}</span>${undo ? '<button>Undo</button>' : ''}`;
-  if (undo)
-    el.querySelector('button').onclick = () => {
-      undo();
-      el.classList.remove('show');
-    };
-  requestAnimationFrame(() => el.classList.add('show'));
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), undo ? 4000 : 2200);
 }
 
-function openSheet(build) {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'sheet-backdrop';
-  const sheet = document.createElement('div');
-  sheet.className = 'sheet';
-  document.body.append(backdrop, sheet);
-  document.body.style.overflow = 'hidden';
-  const close = () => {
-    sheet.classList.remove('open');
-    backdrop.classList.remove('open');
-    document.body.style.overflow = '';
-    setTimeout(() => {
-      sheet.remove();
-      backdrop.remove();
-    }, 320);
-  };
-  backdrop.onclick = close;
-  const ctx = { sheet, close, rerender: () => build(ctx) };
-  build(ctx);
-  requestAnimationFrame(() => {
-    sheet.classList.add('open');
-    backdrop.classList.add('open');
-  });
-  return ctx;
-}
-
-function actionSheet(title, actions) {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'sheet-backdrop';
-  const el = document.createElement('div');
-  el.className = 'actions';
-  el.innerHTML = `<div class="group">${title ? `<div class="head">${esc(title)}</div>` : ''}
-    ${actions.map((a, i) => `<button class="act ${a.red ? 'red' : ''}" data-i="${i}">${esc(a.label)}</button>`).join('')}</div>
-    <button class="act cancel">Cancel</button>`;
-  document.body.append(backdrop, el);
-  const close = () => {
-    el.classList.remove('open');
-    backdrop.classList.remove('open');
-    setTimeout(() => {
-      el.remove();
-      backdrop.remove();
-    }, 300);
-  };
-  backdrop.onclick = close;
-  el.onclick = (e) => {
-    const b = e.target.closest('button');
-    if (!b) return;
-    close();
-    if (b.dataset.i != null) actions[+b.dataset.i].run();
-  };
-  requestAnimationFrame(() => {
-    el.classList.add('open');
-    backdrop.classList.add('open');
-  });
-}
-
-// ---------- item actions ----------
+// ---------- actions ----------
 
 function buy(id) {
   const pid = S.markBought(id);
-  toast(`${store.data.items[id].name} bought`, () => S.undoPurchase(pid));
+  toast(`${store.data.items[id].name} is in the cart`, { undo: () => S.undoPurchase(pid) });
 }
 
-function rowMenu(id) {
-  const item = store.data.items[id];
-  const st = S.status(item);
-  const onList = st.kind === 'needed' || st.kind === 'due';
-  const acts = [{ label: 'Bought', run: () => buy(id) }];
-  if (st.kind === 'needed' && item.mode === 'none') acts.push({ label: 'Remove from list', run: () => S.setNeeded(id, false) });
-  else if (onList)
-    acts.push({
-      label: 'Still have some',
-      run: () => {
-        const days = S.snooze(id);
-        toast(`Hidden for ${days} day${days > 1 ? 's' : ''}`);
-      },
-    });
-  else acts.push({ label: 'Add to list', run: () => S.setNeeded(id, true) });
-  acts.push({ label: 'Edit item', run: () => itemSheet(id) });
-  actionSheet(`${item.name} · ${freqText(st, item)}`, acts);
+function toggleQuick(id) {
+  const st = S.status(store.data.items[id]);
+  if (onListKind(st.kind)) {
+    if (st.kind === 'needed') S.setNeeded(id, false);
+    else S.snooze(id);
+    ui.addedNow.delete(id);
+  } else {
+    S.setNeeded(id, true);
+    ui.addedNow.add(id);
+  }
 }
 
-function stepperRow(label, sub, value, act) {
-  return `<div class="row"><div class="body"><div class="title">${label}</div><div class="sub">${sub}</div></div>
-    <span class="detail" style="min-width:56px;text-align:right">${value} day${value === 1 ? '' : 's'}</span>
-    <div class="stepper"><button data-s="${act}" data-d="-1">−</button><button data-s="${act}" data-d="1">+</button></div></div>`;
+// ---------- shared sheet parts ----------
+
+function rhythmControls(mode, interval, hint) {
+  const presets = [2, 3, 5, 7, 14, 30];
+  return `<div class="segmented">
+      ${[
+        ['auto', 'Learn'],
+        ['fixed', 'Fixed'],
+        ['none', 'As needed'],
+      ]
+        .map(([k, l]) => `<button class="${mode === k ? 'on' : ''}" data-s="mode" data-m="${k}">${l}</button>`)
+        .join('')}
+    </div>
+    ${
+      mode === 'none'
+        ? ''
+        : `<div class="group rhythm">
+      <div class="row"><div class="body"><div class="title">${mode === 'auto' ? 'Starting guess' : 'Every'}</div><div class="sub">${hint}</div></div>
+        <span class="detail big">${interval} day${interval === 1 ? '' : 's'}</span>
+        <div class="stepper"><button data-s="int" data-d="-1" aria-label="Fewer days">−</button><button data-s="int" data-d="1" aria-label="More days">+</button></div></div>
+      <div class="chips">${presets.map((n) => `<button class="chip ${interval === n ? 'on' : ''}" data-s="setint" data-n="${n}">${formatInterval(n)}</button>`).join('')}</div>
+    </div>`
+    }`;
 }
 
-function itemSheet(id, presetName = '', presetNeeded = false) {
-  const isNew = !id;
-  const src = isNew ? { name: presetName, cat: 'other', mode: 'auto', interval: 7, needed: presetNeeded } : store.data.items[id];
-  const draft = { name: src.name, cat: src.cat, mode: src.mode, interval: src.interval || 7, needed: !!src.needed };
+function iconPicker(current, withAuto) {
+  return `<div class="picker icon-grid">
+    ${withAuto ? `<button class="auto ${current ? '' : 'on'}" data-s="pickicon" data-ic="">Auto</button>` : ''}
+    ${ICON_CHOICES.map((ic) => `<button class="${ic === current ? 'on' : ''}" data-s="pickicon" data-ic="${ic}">${ic}</button>`).join('')}</div>`;
+}
 
-  openSheet((ctx) => {
-    const item = isNew ? null : store.data.items[id];
-    const st = item ? S.status(item) : null;
-    const hist = item ? S.history(id) : [];
-    const cats = S.categories();
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Cancel</button><h2>${isNew ? 'New Item' : esc(draft.name)}</h2>
-        <button class="nav-btn" data-s="save" style="font-weight:600">${isNew ? 'Add' : 'Done'}</button></div>
-      <div class="sheet-body">
-        <div class="group" style="margin-top:8px">
-          <label class="row"><input type="text" data-f="name" value="${esc(draft.name)}" placeholder="Name" autocomplete="off"></label>
-          <label class="row"><span class="label">Category</span><select data-f="cat">${cats
-            .map((c) => `<option value="${c.id}" ${c.id === draft.cat ? 'selected' : ''}>${esc(c.name)}</option>`)
-            .join('')}</select><span class="chev">${icons.chevron}</span></label>
-        </div>
+// Bring the selected category pill into view inside its horizontal scroller.
+function centerSelectedPill(root) {
+  const row = root.querySelector('.cat-scroll');
+  const on = row?.querySelector('.cat-pill.on');
+  if (on) row.scrollLeft = on.offsetLeft - row.clientWidth / 2 + on.clientWidth / 2;
+}
 
-        <div class="section-header">How often</div>
-        <div class="segmented">
-          ${[
-            ['auto', 'Learn'],
-            ['fixed', 'Fixed'],
-            ['none', 'As needed'],
-          ]
-            .map(([k, l]) => `<button class="${draft.mode === k ? 'on' : ''}" data-s="mode" data-m="${k}">${l}</button>`)
-            .join('')}
-        </div>
-        ${
-          draft.mode === 'none'
-            ? `<p class="section-footer">Never predicted. Add it to the list when you need it.</p>`
-            : `<div class="group" style="margin-top:10px">
-            ${stepperRow(draft.mode === 'auto' ? 'Starting guess' : 'Every', draft.mode === 'auto' ? 'Adjusts as you check it off' : 'Always this interval', draft.interval, 'int')}
-            <div class="chips">${[2, 3, 5, 7, 14, 30]
-              .map((n) => `<button class="chip ${draft.interval === n ? 'on' : ''}" data-s="setint" data-n="${n}">${formatInterval(n)}</button>`)
-              .join('')}</div></div>`
-        }
-        ${
-          item
-            ? `<div class="section-header">Status</div><div class="group">
-            <div class="row"><div class="body">Next</div><span class="detail">${st.kind === 'needed' ? 'On list' : st.daysLeft == null ? '—' : dueLabel(st)}</span></div>
-            <div class="row"><div class="body">Last bought</div><span class="detail">${st.lastBought ? fmtDate(st.lastBought) : 'Not yet'}</span></div>
-            ${item.mode === 'auto' ? `<div class="row"><div class="body">Learned</div><span class="detail">${st.samples ? `${formatInterval(st.interval)} (${st.purchases} buys)` : 'Needs 2+ buys'}</span></div>` : ''}
+function catPicker(current) {
+  return `<div class="cat-scroll" data-nodrag>${S.categories()
+    .map((c) => `<button class="cat-pill ${c.id === current ? 'on' : ''}" data-s="pickcat" data-c="${c.id}">${catIcon(c.id)} ${esc(c.name)}</button>`)
+    .join('')}</div>`;
+}
+
+// ---------- item detail ----------
+
+function itemDetail(id) {
+  const local = { icon: false, cat: false };
+  const ctx = openSheet(
+    (ctx) => {
+      const item = store.data.items[id];
+      if (!item || item.deleted) return ctx.close();
+      const st = S.status(item);
+      const hist = S.history(id);
+      const on = onListKind(st.kind);
+      const lvl = stockLevel(st);
+      const last = hist[0];
+
+      let statusTitle;
+      if (st.kind === 'needed') statusTitle = 'On your list';
+      else if (st.kind === 'due') statusTitle = st.daysLeft === 0 ? 'Due today' : `Due ${formatDays(st.daysLeft)}`;
+      else if (st.daysLeft == null) statusTitle = 'Buy when needed';
+      else statusTitle = `Runs out ${formatDays(st.daysLeft)}`;
+      const statusSub = last
+        ? `Last bought ${fmtDate(last.at)}${last.by ? ' by ' + esc(last.by) : ''}`
+        : item.mode === 'none'
+          ? 'Not bought yet'
+          : `Assumed stocked since ${fmtDate(item.baselineAt)}`;
+
+      let insight = '';
+      if (item.mode === 'auto')
+        insight = st.samples
+          ? `🧠 Learned from ${st.purchases} buys: you buy this about <b>${formatInterval(st.interval)}</b>. Your starting guess was ${item.interval} days.`
+          : `🧠 Restock learns your real rhythm once you've bought it twice.`;
+      if (item.mode === 'fixed') insight = `Always due ${formatInterval(item.interval)} after you buy it.`;
+      if (item.mode === 'none') insight = `Never predicted. It only shows up when you add it.`;
+
+      const timeline = hist
+        .slice(0, 8)
+        .map((p, i) => {
+          const prev = hist[i + 1];
+          const gap = prev ? Math.round((p.at - prev.at) / DAY) : null;
+          return `<div class="row compact"><span class="tl-dot"></span><div class="body"><div class="title">${fmtDate(p.at)}</div></div>
+            <span class="detail small">${p.by ? esc(p.by) : ''}</span>${gap != null ? `<span class="pill">+${gap}d</span>` : ''}</div>`;
+        })
+        .join('');
+
+      ctx.body.innerHTML = `${sheetHeader('')}
+        <div class="sheet-body">
+          <div class="hero">
+            <button class="hero-icon" data-s="icon" aria-label="Change icon">${itemIcon(item)}<span class="hero-edit">${icons.pencil}</span></button>
+            <input class="hero-name" id="dname" value="${esc(item.name)}" autocomplete="off" enterkeyhint="done" aria-label="Name">
+            <button class="cat-chip" data-s="cat">${catIcon(item.cat)} ${esc(catName(item.cat))} <span class="caret">▾</span></button>
           </div>
-          <div class="group" style="margin-top:16px">
-            <button class="row tappable action" data-s="toggle"><div class="body">${st.kind === 'needed' ? 'Remove from list' : 'Add to list'}</div></button>
-            <button class="row tappable action" data-s="buy"><div class="body">Mark bought now</div></button>
-          </div>
-          ${
-            hist.length
-              ? `<div class="section-header">History</div><div class="group">${hist
-                  .slice(0, 10)
-                  .map((p) => `<div class="row"><div class="body">${fmtDate(p.at)}</div><span class="detail">${esc(p.by || '')}</span></div>`)
-                  .join('')}</div>`
-              : ''
-          }
-          <div class="group" style="margin-top:24px"><button class="row tappable danger" data-s="delete">Delete item</button></div>`
-            : `<div class="group" style="margin-top:16px"><label class="row"><div class="body">Add to list now</div><input type="checkbox" data-f="needed" ${src.needed ? 'checked' : ''} style="width:22px;height:22px;accent-color:var(--tint)"></label></div>`
-        }
-      </div>`;
+          ${local.icon ? iconPicker(item.icon || null, true) : ''}
+          ${local.cat ? catPicker(item.cat) : ''}
 
-    ctx.sheet.oninput = ctx.sheet.onchange = (e) => {
-      const f = e.target.dataset.f;
-      if (f === 'name') draft.name = e.target.value;
-      if (f === 'cat') draft.cat = e.target.value;
-      if (f === 'needed') draft.needed = e.target.checked;
-    };
-    ctx.sheet.onclick = (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      const s = b.dataset.s;
-      if (s === 'cancel') return ctx.close();
-      if (s === 'save') {
-        const name = draft.name.trim();
-        if (!name) return;
-        const patch = { name, cat: draft.cat, mode: draft.mode, interval: draft.interval };
-        if (isNew) {
-          const existing = S.findItemByName(name);
-          if (existing) {
-            S.updateItem(existing.id, { ...patch, needed: existing.needed || !!draft.needed });
-          } else {
-            S.addItem({ ...patch, needed: !!draft.needed });
-          }
-          toast(`${name} added`);
-        } else S.updateItem(id, patch);
-        return ctx.close();
-      }
-      if (s === 'mode') draft.mode = b.dataset.m;
-      if (s === 'int') draft.interval = Math.min(180, Math.max(1, Math.round(draft.interval) + +b.dataset.d));
-      if (s === 'setint') draft.interval = +b.dataset.n;
-      if (s === 'toggle') S.setNeeded(id, S.status(store.data.items[id]).kind !== 'needed');
-      if (s === 'buy') {
-        buy(id);
-        return ctx.close();
-      }
-      if (s === 'delete') {
-        if (confirm(`Delete ${item.name}? Its history is removed too.`)) {
-          S.deleteItem(id);
-          ctx.close();
-        }
-        return;
-      }
-      ctx.rerender();
-    };
+          <div class="status-card ${st.kind}">
+            <div class="status-title">${statusTitle}</div>
+            <div class="status-sub">${statusSub}</div>
+            ${lvl != null ? `<div class="meter"><div style="width:${Math.round(lvl * 100)}%;background:${meterColor(lvl)}"></div></div><div class="meter-cap"><span>Empty</span><span>~${Math.round(lvl * 100)}% left</span><span>Full</span></div>` : ''}
+          </div>
+
+          <div class="action-row">
+            <button class="action-tile ${on ? 'on' : ''}" data-s="toggle">${on ? icons.checkCircle : icons.cart}<span>${on ? 'On list' : 'Add to list'}</span></button>
+            <button class="action-tile" data-s="buy">${icons.bag}<span>Bought now</span></button>
+            <button class="action-tile" data-s="snooze" ${item.mode === 'none' ? 'disabled' : ''}>${icons.hourglass}<span>Still have</span></button>
+          </div>
+
+          <div class="section-header">How often</div>
+          ${rhythmControls(item.mode, item.interval || 7, item.mode === 'auto' ? 'Adjusts as you buy it' : 'Never changes')}
+          <p class="insight">${insight}</p>
+
+          <div class="section-header"><span>History</span>${hist.length ? `<span class="count">${hist.length} buy${hist.length > 1 ? 's' : ''}</span>` : ''}</div>
+          ${hist.length ? `<div class="group timeline">${timeline}</div>` : `<p class="insight">No purchases yet.</p>`}
+
+          <button class="delete-btn" data-s="delete">${icons.trash} Delete item</button>
+        </div>`;
+      if (local.cat) centerSelectedPill(ctx.body);
+    },
+    { large: true },
+  );
+
+  ctx.body.addEventListener('change', (e) => {
+    if (e.target.id !== 'dname') return;
+    const name = e.target.value.trim();
+    if (name && name !== store.data.items[id].name) {
+      S.updateItem(id, { name });
+      toast('Name saved');
+    } else e.target.value = store.data.items[id].name;
   });
-}
-
-function categorySheet(id) {
-  const cat = store.data.categories[id];
-  const draft = { name: cat.name, icon: catIcon(id) };
-  openSheet((ctx) => {
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Cancel</button><h2>Category</h2>
-        <button class="nav-btn" data-s="save" style="font-weight:600">Done</button></div>
-      <div class="sheet-body">
-        <div class="cat-preview">${draft.icon}</div>
-        <div class="group"><label class="row"><input type="text" id="catname" value="${esc(draft.name)}" placeholder="Name" autocomplete="off"></label></div>
-        <div class="section-header">Icon</div>
-        <div class="icon-grid">${ICON_CHOICES.map((ic) => `<button class="${ic === draft.icon ? 'on' : ''}" data-s="icon" data-ic="${ic}">${ic}</button>`).join('')}</div>
-      </div>`;
-    ctx.sheet.oninput = (e) => {
-      if (e.target.id === 'catname') draft.name = e.target.value;
-    };
-    ctx.sheet.onclick = (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      if (b.dataset.s === 'cancel') return ctx.close();
-      if (b.dataset.s === 'icon') {
-        draft.icon = b.dataset.ic;
-        return ctx.rerender();
-      }
-      if (b.dataset.s === 'save') {
-        if (draft.name.trim()) S.updateCategory(id, { name: draft.name.trim(), icon: draft.icon });
+  ctx.body.addEventListener('keydown', (e) => {
+    if (e.target.id === 'dname' && e.key === 'Enter') e.target.blur();
+  });
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b || b.disabled) return;
+    const item = store.data.items[id];
+    const s = b.dataset.s;
+    if (s === 'icon') local.icon = !local.icon;
+    if (s === 'cat') local.cat = !local.cat;
+    if (s === 'pickicon') {
+      S.updateItem(id, { icon: b.dataset.ic || null });
+      local.icon = false;
+    }
+    if (s === 'pickcat') {
+      S.updateItem(id, { cat: b.dataset.c });
+      local.cat = false;
+    }
+    if (s === 'toggle') {
+      const st = S.status(item);
+      if (st.kind === 'needed') S.setNeeded(id, false);
+      else if (st.kind === 'due') S.snooze(id);
+      else S.setNeeded(id, true);
+    }
+    if (s === 'buy') {
+      buy(id);
+      return ctx.close();
+    }
+    if (s === 'snooze') {
+      const days = S.snooze(id);
+      toast(`Hidden for ${days} day${days > 1 ? 's' : ''}`, { icon: '⏳' });
+    }
+    if (s === 'mode') S.updateItem(id, { mode: b.dataset.m, interval: item.interval || 7 });
+    if (s === 'int') S.updateItem(id, { interval: Math.min(180, Math.max(1, Math.round(item.interval) + +b.dataset.d)) });
+    if (s === 'setint') S.updateItem(id, { interval: +b.dataset.n });
+    if (s === 'delete') {
+      return confirmAction(`Delete ${item.name}? Its history goes too.`, 'Delete item', () => {
+        S.deleteItem(id);
         ctx.close();
-      }
-    };
+        toast(`${item.name} deleted`, { icon: '🗑️' });
+      });
+    }
+    ctx.rerender();
   });
 }
 
-// ---------- meals ----------
+// ---------- create item ----------
+
+const RHYTHM_OPTIONS = [
+  [3, 'Every few days', 'Fresh food'],
+  [7, 'Weekly', 'Most groceries'],
+  [14, 'Every 2 weeks', 'Pantry'],
+  [30, 'Monthly', 'Cleaning, care'],
+  [null, 'As needed', 'Never predicted'],
+  ['custom', 'Custom', 'Pick the days'],
+];
+
+function createSheet(presetName = '', { needed = true } = {}) {
+  const d = { name: presetName, cat: null, icon: null, rhythm: undefined, needed, pickIcon: false };
+  const cat = () => d.cat || guessCategory(d.name, S.items()) || 'other';
+  const rhythm = () => (d.rhythm !== undefined ? d.rhythm : (CATEGORY_RHYTHM[cat()] ?? null));
+  const isPreset = (r) => RHYTHM_OPTIONS.some(([k]) => k === r);
+
+  let ctx;
+  ctx = openSheet(
+    (c) => {
+      ctx = c;
+      ctx.body.innerHTML = `${sheetHeader('New item')}
+        <div class="sheet-body">
+          <div class="create-hero">
+            <button class="hero-icon" data-s="icon" id="cicon" aria-label="Change icon"></button>
+            <input class="hero-name" id="cname" placeholder="Item name" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done">
+          </div>
+          <div id="cdyn"></div>
+        </div>
+        <div class="sheet-footer"><button class="btn" data-s="save" id="csave"></button></div>`;
+      paint();
+    },
+    { large: true },
+  );
+
+  // Only the parts below the name field re-render while typing, so the keyboard never flickers.
+  function paint() {
+    const body = ctx.body;
+    const c = cat();
+    const r = rhythm();
+    const name = d.name.trim();
+    const dup = name && S.findItemByName(name);
+    body.querySelector('#cicon').innerHTML = `${d.icon || guessItemIcon(name) || catIcon(c)}<span class="hero-edit">${icons.pencil}</span>`;
+    const selected = (k) => (k === 'custom' ? r !== null && !isPreset(r) : k === r);
+    body.querySelector('#cdyn').innerHTML = `
+      ${d.pickIcon ? iconPicker(d.icon, true) : ''}
+      ${
+        dup
+          ? `<div class="card dup"><h4>${itemIcon(dup)} ${esc(dup.name)} is already in your items</h4>
+          <button class="btn secondary" data-s="adddup">Add it to the list instead</button></div>`
+          : ''
+      }
+      <div class="section-header"><span>Category</span>${!d.cat && name && guessCategory(name, S.items()) ? '<span class="auto-tag">✨ Guessed</span>' : ''}</div>
+      ${catPicker(c)}
+      <div class="section-header"><span>How often do you buy it?</span>${d.rhythm === undefined && name ? '<span class="auto-tag">✨ Suggested</span>' : ''}</div>
+      <div class="rhythm-grid">${RHYTHM_OPTIONS.map(
+        ([k, l, sub]) =>
+          `<button class="rhythm-card ${selected(k) ? 'on' : ''}" data-s="rhythm" data-k="${k}"><b>${l}</b><span>${k === 'custom' && selected(k) ? `every ${r} days` : sub}</span></button>`,
+      ).join('')}</div>
+      ${
+        r !== null && !isPreset(r)
+          ? `<div class="group" style="margin-top:10px"><div class="row"><div class="body"><div class="title">Every</div></div>
+        <span class="detail big">${r} days</span>
+        <div class="stepper"><button data-s="custom" data-d="-1" aria-label="Fewer days">−</button><button data-s="custom" data-d="1" aria-label="More days">+</button></div></div></div>`
+          : ''
+      }
+      ${r !== null ? `<p class="insight">🧠 Just a starting point. Restock learns your real rhythm as you buy it.</p>` : ''}
+      <div class="group" style="margin-top:16px"><label class="row switch-row"><div class="body"><div class="title">Add to shopping list now</div></div>
+        <input type="checkbox" class="switch" data-s="needed" ${d.needed ? 'checked' : ''}></label></div>`;
+    centerSelectedPill(body);
+    const btn = body.querySelector('#csave');
+    btn.textContent = name ? `Add ${name}` : 'Add item';
+    btn.disabled = !name || !!dup;
+  }
+
+  ctx.body.addEventListener('input', (e) => {
+    if (e.target.id === 'cname') {
+      d.name = e.target.value;
+      paint();
+    }
+  });
+  ctx.body.addEventListener('change', (e) => {
+    if (e.target.dataset.s === 'needed') d.needed = e.target.checked;
+  });
+  ctx.body.addEventListener('keydown', (e) => {
+    if (e.target.id === 'cname' && e.key === 'Enter') {
+      e.preventDefault();
+      e.target.blur();
+    }
+  });
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b || b.disabled || b.dataset.s === 'needed') return;
+    const s = b.dataset.s;
+    if (s === 'icon') d.pickIcon = !d.pickIcon;
+    if (s === 'pickicon') {
+      d.icon = b.dataset.ic || null;
+      d.pickIcon = false;
+    }
+    if (s === 'pickcat') d.cat = b.dataset.c;
+    if (s === 'rhythm') {
+      const k = b.dataset.k;
+      const r = rhythm();
+      d.rhythm = k === 'null' ? null : k === 'custom' ? (r !== null && !isPreset(r) ? r : 10) : +k;
+    }
+    if (s === 'custom') d.rhythm = Math.min(180, Math.max(1, rhythm() + +b.dataset.d));
+    if (s === 'adddup') {
+      const dup = S.findItemByName(d.name);
+      S.setNeeded(dup.id, true);
+      toast(`${dup.name} added to your list`);
+      return ctx.close();
+    }
+    if (s === 'save') {
+      const r = rhythm();
+      const name = d.name.trim();
+      const newId = S.addItem({ name, cat: cat(), mode: r === null ? 'none' : 'auto', interval: r ?? 7, needed: d.needed });
+      if (d.icon) S.updateItem(newId, { icon: d.icon });
+      toast(d.needed ? `${name} created and added to your list` : `${name} created`);
+      return ctx.close();
+    }
+    paint();
+  });
+  if (!presetName) setTimeout(() => ctx.body.querySelector('#cname')?.focus(), 350);
+}
+
+// ---------- settings sheets ----------
+
+function aislesSheet() {
+  const ctx = openSheet(
+    (ctx) => {
+      ctx.body.innerHTML = `${sheetHeader('Aisle order')}
+        <div class="sheet-body">
+          <p class="sheet-intro">Drag ≡ to match the way you walk through your supermarket. Your list follows this order.</p>
+          <div class="group aisle-list">${S.categories()
+            .map(
+              (c) => `<div class="row arow" data-id="${c.id}">
+              <span class="cat-icon lg">${catIcon(c.id)}</span>
+              <button class="body" data-s="edit" data-id="${c.id}"><div class="title">${esc(c.name)}</div></button>
+              <span class="drag-handle" data-nodrag aria-label="Drag to reorder">${icons.grip}</span></div>`,
+            )
+            .join('')}</div>
+          <button class="btn secondary" data-s="add" style="margin-top:16px">Add category</button>
+          <p class="section-footer">Tap a category to rename it or change its icon.</p>
+        </div>`;
+    },
+    { large: true },
+  );
+
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    if (b.dataset.s === 'edit') categorySheet(b.dataset.id, () => ctx.rerender());
+    if (b.dataset.s === 'add') categorySheet(null, () => ctx.rerender());
+  });
+
+  // drag to reorder
+  ctx.body.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    e.preventDefault();
+    const rows = [...ctx.body.querySelector('.aisle-list').children];
+    const row = handle.closest('.arow');
+    const from = rows.indexOf(row);
+    const H = row.offsetHeight;
+    const startY = e.clientY;
+    let to = from;
+    handle.setPointerCapture(e.pointerId);
+    row.classList.add('dragging');
+    const move = (ev) => {
+      const dy = ev.clientY - startY;
+      row.style.transform = `translateY(${dy}px)`;
+      to = Math.max(0, Math.min(rows.length - 1, from + Math.round(dy / H)));
+      rows.forEach((r, i) => {
+        if (r === row) return;
+        let shift = 0;
+        if (from < to && i > from && i <= to) shift = -H;
+        if (from > to && i < from && i >= to) shift = H;
+        r.style.transform = shift ? `translateY(${shift}px)` : '';
+      });
+    };
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      rows.forEach((r) => (r.style.transform = ''));
+      row.classList.remove('dragging');
+      if (to !== from) {
+        const ids = rows.map((r) => r.dataset.id);
+        ids.splice(to, 0, ids.splice(from, 1)[0]);
+        S.setCategoryOrder(ids);
+        ctx.rerender();
+      }
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+}
+
+function categorySheet(id, done) {
+  const cat = id ? store.data.categories[id] : null;
+  const d = { name: cat?.name || '', icon: id ? catIcon(id) : '📦' };
+  const ctx = openSheet((ctx) => {
+    ctx.body.innerHTML = `${sheetHeader(id ? 'Category' : 'New category')}
+      <div class="sheet-body">
+        <div class="cat-preview" id="catprev">${d.icon}</div>
+        <div class="group"><label class="row"><input type="text" id="catname" value="${esc(d.name)}" placeholder="Category name" autocomplete="off"></label></div>
+        <div class="section-header">Icon</div>
+        ${iconPicker(d.icon, false)}
+      </div>
+      <div class="sheet-footer"><button class="btn" data-s="save">${id ? 'Save' : 'Add category'}</button></div>`;
+  });
+  ctx.body.addEventListener('input', (e) => {
+    if (e.target.id === 'catname') d.name = e.target.value;
+  });
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    if (b.dataset.s === 'pickicon') {
+      d.icon = b.dataset.ic;
+      ctx.body.querySelector('#catprev').textContent = d.icon;
+      ctx.body.querySelectorAll('.icon-grid button').forEach((x) => x.classList.toggle('on', x === b));
+    }
+    if (b.dataset.s === 'save') {
+      const name = d.name.trim();
+      if (!name) return ctx.body.querySelector('#catname').focus();
+      if (id) S.updateCategory(id, { name, icon: d.icon });
+      else S.updateCategory(S.addCategory(name), { icon: d.icon });
+      ctx.close();
+      done?.();
+    }
+  });
+}
+
+function syncSheet() {
+  const ctx = openSheet((ctx) => {
+    const c = store.device.sync;
+    if (!c) {
+      ctx.body.innerHTML = `${sheetHeader('Partner sync')}
+        <div class="sheet-body">
+          <div class="feature-hero"><div class="fh-icon">👫</div><h3>Share one list</h3>
+            <p>Both phones see the same list. Check something off in the store and it's gone on your partner's phone too.</p></div>
+          <div class="choice-list">
+            <button class="choice" data-s="setup"><span class="sicon" style="background:#30d158">${icons.people}</span>
+              <div><b>Set up on this phone</b><span>First time. Needs a GitHub token (2 min).</span></div><span class="chev">${icons.chevron}</span></button>
+            <button class="choice" data-s="join"><span class="sicon" style="background:#0a84ff">${icons.share}</span>
+              <div><b>Join my partner's list</b><span>Paste the invite code they sent you.</span></div><span class="chev">${icons.chevron}</span></button>
+          </div>
+        </div>`;
+    } else {
+      ctx.body.innerHTML = `${sheetHeader('Partner sync')}
+        <div class="sheet-body">
+          <div class="feature-hero compact"><div class="fh-icon">👫</div><h3>${syncBadge()}</h3>
+            <p>${syncState.lastSync ? `Last synced ${fmtAgo(syncState.lastSync)}` : 'Not synced yet'}</p>
+            ${syncState.error ? `<p class="err">${esc(syncState.error)}</p>` : ''}</div>
+          <div class="group">
+            <button class="row tappable action" data-s="invite"><div class="body">Invite partner</div><span class="chev">${icons.chevron}</span></button>
+            <button class="row tappable action" data-s="now"><div class="body">Sync now</div></button>
+            <div class="row"><div class="body"><div class="title">Repository</div></div><span class="detail small">${esc(c.owner)}/${esc(c.repo)}</span></div>
+          </div>
+          <button class="delete-btn" data-s="disconnect">Disconnect this phone</button>
+        </div>`;
+    }
+  });
+  const off = onSyncChange(() => ctx.rerender());
+  ctx.onClose = off;
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    const s = b.dataset.s;
+    if (s === 'setup') setupSheet(() => ctx.rerender());
+    if (s === 'join') joinSheet('', () => ctx.rerender());
+    if (s === 'invite') inviteSheet();
+    if (s === 'now') syncNow();
+    if (s === 'disconnect')
+      confirmAction('Stop syncing on this phone? Your data stays here.', 'Disconnect', () => {
+        disconnect();
+        ctx.rerender();
+      });
+  });
+}
+
+function joinSheet(prefill = '', done) {
+  const ctx = openSheet((ctx) => {
+    ctx.body.innerHTML = `${sheetHeader('Join list')}
+      <div class="sheet-body">
+        <p class="sheet-intro">Paste the invite code from your partner's phone (Settings → Partner sync → Invite partner).</p>
+        <textarea class="code" id="joincode" placeholder="RS1.…" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(prefill)}</textarea>
+        <div class="err" id="joinerr"></div>
+      </div>
+      <div class="sheet-footer two"><button class="btn secondary" data-s="paste">Paste</button><button class="btn" data-s="go">Join</button></div>`;
+  });
+  ctx.body.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    const ta = ctx.body.querySelector('#joincode');
+    if (b.dataset.s === 'paste') {
+      try {
+        ta.value = await navigator.clipboard.readText();
+      } catch {
+        ta.focus();
+      }
+    }
+    if (b.dataset.s === 'go') {
+      b.disabled = true;
+      b.textContent = 'Joining…';
+      try {
+        await connect(parseInvite(ta.value));
+        ctx.close();
+        done?.();
+        toast('Connected. Your lists are now shared.', { icon: '👫' });
+      } catch (x) {
+        ctx.body.querySelector('#joinerr').textContent = x.message;
+        b.disabled = false;
+        b.textContent = 'Join';
+      }
+    }
+  });
+}
+
+function setupSheet(done) {
+  const d = { owner: 'YBousetta', repo: 'restock-data', token: '' };
+  const ctx = openSheet(
+    (ctx) => {
+      ctx.body.innerHTML = `${sheetHeader('Set up sync')}
+      <div class="sheet-body">
+        <p class="sheet-intro">Your list is saved as a file in your private GitHub repo. Do this once, then invite your partner.</p>
+        <ol class="steps">
+          <li>Open <b>github.com/settings/personal-access-tokens/new</b></li>
+          <li>Repository access: <b>only ${esc(d.repo)}</b></li>
+          <li>Permissions → <b>Contents: Read and write</b></li>
+          <li>Generate, copy the token, paste it below</li>
+        </ol>
+        <div class="group">
+          <label class="row"><span class="label">Owner</span><input type="text" data-f="owner" value="${esc(d.owner)}" style="text-align:right" autocapitalize="off" autocorrect="off"></label>
+          <label class="row"><span class="label">Repo</span><input type="text" data-f="repo" value="${esc(d.repo)}" style="text-align:right" autocapitalize="off" autocorrect="off"></label>
+          <label class="row"><span class="label">Token</span><input type="text" data-f="token" placeholder="github_pat_…" style="text-align:right" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+        </div>
+        <div class="err" id="seterr"></div>
+      </div>
+      <div class="sheet-footer"><button class="btn" data-s="go">Connect</button></div>`;
+    },
+    { large: true },
+  );
+  ctx.body.addEventListener('input', (e) => {
+    if (e.target.dataset.f) d[e.target.dataset.f] = e.target.value.trim();
+  });
+  ctx.body.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b || b.dataset.s !== 'go') return;
+    const err = ctx.body.querySelector('#seterr');
+    if (!d.owner || !d.repo || !d.token) return (err.textContent = 'Fill in all three fields.');
+    b.disabled = true;
+    b.textContent = 'Connecting…';
+    try {
+      await connect({ owner: d.owner, repo: d.repo, token: d.token });
+      ctx.close();
+      done?.();
+      toast('Sync is on', { icon: '👫' });
+      inviteSheet();
+    } catch (x) {
+      err.textContent = x.message;
+      b.disabled = false;
+      b.textContent = 'Connect';
+    }
+  });
+}
+
+function inviteSheet() {
+  const code = inviteCode();
+  const link = `${location.origin}${location.pathname}#join=${code}`;
+  const ctx = openSheet((ctx) => {
+    ctx.body.innerHTML = `${sheetHeader('Invite partner')}
+      <div class="sheet-body">
+        <div class="feature-hero compact"><div class="fh-icon">💌</div><h3>Send this privately</h3><p>The link contains the access key to your list.</p></div>
+        <ol class="steps">
+          <li>Your partner opens the link on their iPhone</li>
+          <li><b>Share → Add to Home Screen</b></li>
+          <li>Opens Restock from the Home Screen → Settings → Partner sync → <b>Join</b> → paste the code</li>
+        </ol>
+        <textarea class="code" readonly>${esc(code)}</textarea>
+      </div>
+      <div class="sheet-footer two"><button class="btn secondary" data-s="copy">Copy code</button><button class="btn" data-s="share">Share link</button></div>`;
+  });
+  ctx.body.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    if (b.dataset.s === 'copy') {
+      try {
+        await navigator.clipboard.writeText(code);
+        toast('Code copied');
+      } catch {
+        toast('Copy failed. Select the text instead.', { icon: '⚠️' });
+      }
+    }
+    if (b.dataset.s === 'share') {
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'Join our Restock list', text: `Our shared grocery list. Invite code:\n${code}`, url: link });
+        } catch {}
+      } else {
+        await navigator.clipboard.writeText(link);
+        toast('Link copied');
+      }
+    }
+  });
+}
+
+function dataSheet() {
+  const ctx = openSheet((ctx) => {
+    ctx.body.innerHTML = `${sheetHeader('Backup & restore')}
+      <div class="sheet-body">
+        <p class="sheet-intro">Save a copy of your items, meals and purchase history, or bring one back.</p>
+        <div class="group">
+          <button class="row tappable action" data-s="export"><div class="body">Export backup</div></button>
+          <label class="row tappable action"><div class="body">Import backup</div><input type="file" accept="application/json,.json" id="importfile" hidden></label>
+        </div>
+        <button class="delete-btn" data-s="reset">Reset to starting list</button>
+      </div>`;
+  });
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    if (b.dataset.s === 'export') exportData();
+    if (b.dataset.s === 'reset')
+      confirmAction('Replace items, meals and history on this phone with the starting list?', 'Reset', () => {
+        S.resetData();
+        ctx.close();
+      });
+  });
+  ctx.body.addEventListener('change', async (e) => {
+    if (e.target.id !== 'importfile') return;
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!data.items) throw new Error();
+      S.importData(data);
+      toast('Backup imported');
+      ctx.close();
+    } catch {
+      toast('That file is not a Restock backup', { icon: '⚠️' });
+    }
+  });
+}
+
+async function exportData() {
+  const json = JSON.stringify(store.data, null, 1);
+  const name = `restock-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const file = new File([json], name, { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: name });
+      return;
+    } catch {}
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function viewMenu() {
+  const cur = listMode();
+  const opt = (k, l, ic) => ({ label: l, icon: ic, on: cur === k, run: () => S.saveDevice({ listView: k }) });
+  actionSheet('Shopping list style', [opt('grid', 'Grid', icons.viewGrid), opt('list', 'List', icons.viewList), opt('compact', 'Compact', icons.viewCompact)]);
+}
+
+// ---------- meal sheets ----------
 
 function mealSheet(id) {
   const meal = store.data.meals[id];
@@ -718,248 +1150,111 @@ function mealSheet(id) {
     const it = store.data.items[iid];
     if (it && !it.deleted && ['due', 'soon'].includes(S.status(it).kind)) picked.add(iid);
   }
-  openSheet((ctx) => {
+  const ctx = openSheet((ctx) => {
     const ings = meal.items.map((iid) => store.data.items[iid]).filter((i) => i && !i.deleted);
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Close</button><h2>${esc(meal.name)}</h2>
-        <button class="nav-btn" data-s="edit">Edit</button></div>
+    ctx.body.innerHTML = `${sheetHeader(meal.name, `<button class="nav-btn" data-s="edit">Edit</button>`)}
       <div class="sheet-body">
-        <div class="section-header">Ingredients</div><div class="group">
-        ${ings
+        <p class="sheet-intro">Pick what you need. Items running low are already selected.</p>
+        <div class="grid">${ings
           .map((i) => {
             const st = S.status(i);
-            const onList = st.kind === 'needed';
-            return `<button class="row has-check ${onList || picked.has(i.id) ? 'checked' : ''}" data-s="pick" data-id="${i.id}" ${onList ? 'disabled' : ''}>
-              <span class="check">${icons.check}</span>
-              <div class="body"><div class="title" style="text-decoration:none;color:var(--label)">${esc(i.name)}</div>
-              <div class="sub">${onList ? 'Already on list' : st.daysLeft == null ? 'as needed' : dueLabel(st)}</div></div></button>`;
+            const already = st.kind === 'needed';
+            const sel = already || picked.has(i.id);
+            return `<button class="tile pick ${sel ? 'sel' : ''}" data-s="pick" data-id="${i.id}" ${already ? 'disabled' : ''}>
+              <span class="tile-icon">${itemIcon(i)}</span><span class="tile-name">${esc(i.name)}</span>
+              <span class="tile-freq">${already ? 'on list' : st.daysLeft == null ? 'as needed' : st.daysLeft <= 0 ? 'due' : formatDays(st.daysLeft)}</span>
+              <span class="tile-sel">${icons.check}</span></button>`;
           })
-          .join('')}
-        </div>
-        <p class="section-footer">Pre-selected: items that are due or running out soon.</p>
-        <div class="btn-row"><button class="btn" data-s="add" ${picked.size ? '' : 'disabled'}>Add ${picked.size || ''} to list</button></div>
-      </div>`;
-    ctx.sheet.onclick = (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      const s = b.dataset.s;
-      if (s === 'cancel') return ctx.close();
-      if (s === 'edit') {
-        ctx.close();
-        return mealEditor(id);
-      }
-      if (s === 'pick') {
-        const iid = b.dataset.id;
-        picked.has(iid) ? picked.delete(iid) : picked.add(iid);
-        return ctx.rerender();
-      }
-      if (s === 'add') {
-        for (const iid of picked) S.setNeeded(iid, true);
-        toast(`${picked.size} item${picked.size > 1 ? 's' : ''} added`);
-        return ctx.close();
-      }
-    };
+          .join('')}</div>
+      </div>
+      <div class="sheet-footer"><button class="btn" data-s="add" ${picked.size ? '' : 'disabled'}>${picked.size ? `Add ${picked.size} to list` : 'Nothing selected'}</button></div>`;
+  });
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b || b.disabled) return;
+    const s = b.dataset.s;
+    if (s === 'edit') {
+      ctx.close();
+      return mealEditor(id);
+    }
+    if (s === 'pick') {
+      picked.has(b.dataset.id) ? picked.delete(b.dataset.id) : picked.add(b.dataset.id);
+      return ctx.rerender();
+    }
+    if (s === 'add') {
+      for (const iid of picked) S.setNeeded(iid, true);
+      toast(`${picked.size} item${picked.size > 1 ? 's' : ''} added for ${meal.name}`);
+      ctx.close();
+    }
   });
 }
 
 function mealEditor(id) {
   const meal = id ? store.data.meals[id] : { name: '', items: [] };
-  const draft = { name: meal.name, items: new Set(meal.items), q: '' };
-  openSheet((ctx) => {
-    const q = draft.q.trim().toLowerCase();
-    const all = S.items()
-      .filter((i) => !q || i.name.toLowerCase().includes(q))
-      .sort((a, b) => (draft.items.has(b.id) - draft.items.has(a.id)) || a.name.localeCompare(b.name));
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Cancel</button><h2>${id ? 'Edit Meal' : 'New Meal'}</h2>
-        <button class="nav-btn" data-s="save" style="font-weight:600">Save</button></div>
+  const d = { name: meal.name, items: new Set(meal.items), q: '' };
+  let ctx;
+  ctx = openSheet(
+    (c) => {
+      ctx = c;
+      ctx.body.innerHTML = `${sheetHeader(id ? 'Edit meal' : 'New meal')}
       <div class="sheet-body">
-        <div class="group" style="margin-top:8px"><label class="row"><input type="text" id="mealname" value="${esc(draft.name)}" placeholder="Meal name" autocomplete="off"></label></div>
-        <div class="section-header">Ingredients · ${draft.items.size}</div>
-        <div class="search">${icons.search}<input id="mealq" type="search" placeholder="Search items" value="${esc(draft.q)}" autocomplete="off"></div>
-        <div class="group" style="margin-top:8px">
-        ${all
-          .slice(0, 80)
-          .map(
-            (i) => `<button class="row has-check ${draft.items.has(i.id) ? 'checked' : ''}" data-s="toggle" data-id="${i.id}">
-            <span class="check">${icons.check}</span><div class="body"><div class="title" style="text-decoration:none;color:var(--label)">${esc(i.name)}</div></div></button>`,
-          )
-          .join('')}
-        </div>
-        ${id ? `<div class="group" style="margin-top:24px"><button class="row tappable danger" data-s="delete">Delete meal</button></div>` : ''}
-      </div>`;
-    const qEl = ctx.sheet.querySelector('#mealq');
-    if (draft.focusQ) {
-      qEl.focus();
-      qEl.setSelectionRange(qEl.value.length, qEl.value.length);
+        <div class="group"><label class="row"><input type="text" id="mealname" value="${esc(d.name)}" placeholder="Meal name, e.g. Tuna bowl" autocomplete="off"></label></div>
+        <div class="section-header" id="mealcount">Ingredients · ${d.items.size}</div>
+        <label class="search">${icons.search}<input id="mealq" type="text" placeholder="Search items" autocomplete="off" autocorrect="off"></label>
+        <div class="group" id="meallist" style="margin-top:8px"></div>
+        ${id ? `<button class="delete-btn" data-s="delete">Delete meal</button>` : ''}
+      </div>
+      <div class="sheet-footer"><button class="btn" data-s="save">Save meal</button></div>`;
+      paint();
+    },
+    { large: true },
+  );
+  function paint() {
+    const q = norm(d.q.trim());
+    const all = S.items()
+      .filter((i) => !q || norm(i.name).includes(q))
+      .sort((a, b) => d.items.has(b.id) - d.items.has(a.id) || a.name.localeCompare(b.name))
+      .slice(0, 60);
+    ctx.body.querySelector('#meallist').innerHTML = all
+      .map(
+        (i) => `<button class="row has-check ${d.items.has(i.id) ? 'checked keep' : ''}" data-s="toggle" data-id="${i.id}">
+        <span class="check">${icons.check}</span><span class="item-icon sm">${itemIcon(i)}</span><div class="body"><div class="title">${esc(i.name)}</div></div></button>`,
+      )
+      .join('');
+    ctx.body.querySelector('#mealcount').textContent = `Ingredients · ${d.items.size}`;
+  }
+  ctx.body.addEventListener('input', (e) => {
+    if (e.target.id === 'mealname') d.name = e.target.value;
+    if (e.target.id === 'mealq') {
+      d.q = e.target.value;
+      paint();
     }
-    ctx.sheet.oninput = (e) => {
-      if (e.target.id === 'mealname') draft.name = e.target.value;
-      if (e.target.id === 'mealq') {
-        draft.q = e.target.value;
-        draft.focusQ = true;
-        ctx.rerender();
-      }
-    };
-    ctx.sheet.onclick = (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      const s = b.dataset.s;
-      if (s === 'cancel') return ctx.close();
-      if (s === 'toggle') {
-        const iid = b.dataset.id;
-        draft.items.has(iid) ? draft.items.delete(iid) : draft.items.add(iid);
-        draft.focusQ = false;
-        return ctx.rerender();
-      }
-      if (s === 'save') {
-        if (!draft.name.trim()) return;
-        S.saveMeal({ id, name: draft.name.trim(), items: [...draft.items] });
-        return ctx.close();
-      }
-      if (s === 'delete' && confirm(`Delete ${meal.name}?`)) {
+  });
+  ctx.body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-s]');
+    if (!b) return;
+    const s = b.dataset.s;
+    if (s === 'toggle') {
+      d.items.has(b.dataset.id) ? d.items.delete(b.dataset.id) : d.items.add(b.dataset.id);
+      return paint();
+    }
+    if (s === 'save') {
+      if (!d.name.trim()) return ctx.body.querySelector('#mealname').focus();
+      S.saveMeal({ id, name: d.name.trim(), items: [...d.items] });
+      toast(`${d.name.trim()} saved`);
+      return ctx.close();
+    }
+    if (s === 'delete')
+      confirmAction(`Delete ${meal.name}?`, 'Delete meal', () => {
         S.deleteMeal(id);
         ctx.close();
-      }
-    };
-  });
-}
-
-// ---------- sync sheets ----------
-
-function joinSheet(prefill = '') {
-  openSheet((ctx) => {
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Cancel</button><h2>Join</h2><span style="width:50px"></span></div>
-      <div class="sheet-body">
-        <p class="subtitle" style="margin:8px 0 12px">Paste the invite code from your partner's phone (Settings → Invite partner).</p>
-        <textarea class="code" id="joincode" placeholder="RS1.…" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(prefill)}</textarea>
-        <div class="btn-row"><button class="btn secondary" data-s="paste">Paste</button><button class="btn" data-s="go">Join</button></div>
-        <div class="err" id="joinerr"></div>
-      </div>`;
-    ctx.sheet.onclick = async (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      const ta = ctx.sheet.querySelector('#joincode');
-      if (b.dataset.s === 'cancel') return ctx.close();
-      if (b.dataset.s === 'paste') {
-        try {
-          ta.value = await navigator.clipboard.readText();
-        } catch {
-          ta.focus();
-        }
-      }
-      if (b.dataset.s === 'go') {
-        const err = ctx.sheet.querySelector('#joinerr');
-        b.disabled = true;
-        b.textContent = 'Joining…';
-        try {
-          await connect(parseInvite(ta.value));
-          ctx.close();
-          toast('Connected. Lists are now shared.');
-        } catch (x) {
-          err.textContent = x.message;
-          b.disabled = false;
-          b.textContent = 'Join';
-        }
-      }
-    };
-  });
-}
-
-function setupSheet() {
-  const draft = { owner: 'YBousetta', repo: 'restock-data', token: '' };
-  openSheet((ctx) => {
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Cancel</button><h2>Set up sync</h2><span style="width:50px"></span></div>
-      <div class="sheet-body">
-        <p class="subtitle" style="margin:8px 0 4px">Your list is saved as a file in a private GitHub repo. Do this once, then invite your partner.</p>
-        <ol class="steps">
-          <li>Create a <b>private</b> repo (e.g. <b>restock-data</b>).</li>
-          <li>GitHub → Settings → Developer settings → <b>Fine-grained tokens</b> → Generate.</li>
-          <li>Repository access: <b>only restock-data</b>. Permissions: <b>Contents: Read and write</b>.</li>
-          <li>Copy the token and paste it below.</li>
-        </ol>
-        <div class="group">
-          <label class="row"><span class="label">Owner</span><input type="text" data-f="owner" value="${esc(draft.owner)}" style="text-align:right" autocapitalize="off" autocorrect="off"></label>
-          <label class="row"><span class="label">Repo</span><input type="text" data-f="repo" value="${esc(draft.repo)}" style="text-align:right" autocapitalize="off" autocorrect="off"></label>
-          <label class="row"><span class="label">Token</span><input type="text" data-f="token" placeholder="github_pat_…" style="text-align:right" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-        </div>
-        <div class="btn-row"><button class="btn" data-s="go">Connect</button></div>
-        <div class="err" id="seterr"></div>
-      </div>`;
-    ctx.sheet.oninput = (e) => {
-      if (e.target.dataset.f) draft[e.target.dataset.f] = e.target.value.trim();
-    };
-    ctx.sheet.onclick = async (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      if (b.dataset.s === 'cancel') return ctx.close();
-      if (b.dataset.s === 'go') {
-        const err = ctx.sheet.querySelector('#seterr');
-        if (!draft.owner || !draft.repo || !draft.token) return (err.textContent = 'Fill in all three fields.');
-        b.disabled = true;
-        b.textContent = 'Connecting…';
-        try {
-          await connect({ owner: draft.owner, repo: draft.repo, token: draft.token });
-          ctx.close();
-          toast('Sync is on');
-          inviteSheet();
-        } catch (x) {
-          err.textContent = x.message;
-          b.disabled = false;
-          b.textContent = 'Connect';
-        }
-      }
-    };
-  });
-}
-
-function inviteSheet() {
-  const code = inviteCode();
-  const link = `${location.origin}${location.pathname}#join=${code}`;
-  openSheet((ctx) => {
-    ctx.sheet.innerHTML = `<div class="grabber"></div>
-      <div class="sheet-head"><span style="width:50px"></span><h2>Invite partner</h2><button class="nav-btn" data-s="cancel" style="font-weight:600">Done</button></div>
-      <div class="sheet-body">
-        <ol class="steps" style="margin-top:10px">
-          <li>Send your partner the link below (privately: it contains the access key).</li>
-          <li>They open it in <b>Safari</b>, tap <b>Share → Add to Home Screen</b>.</li>
-          <li>They open Restock from the home screen, tap <b>I have a code</b>, and paste the code.</li>
-        </ol>
-        <div class="section-header">Invite code</div>
-        <textarea class="code" readonly>${esc(code)}</textarea>
-        <div class="btn-row"><button class="btn secondary" data-s="copy">Copy code</button><button class="btn" data-s="share">${icons.share.replace('<svg', '<svg width="20" height="20"')} Share link</button></div>
-      </div>`;
-    ctx.sheet.onclick = async (e) => {
-      const b = e.target.closest('[data-s]');
-      if (!b) return;
-      if (b.dataset.s === 'cancel') return ctx.close();
-      if (b.dataset.s === 'copy') {
-        try {
-          await navigator.clipboard.writeText(code);
-          toast('Code copied');
-        } catch {
-          toast('Copy failed. Select the text instead.');
-        }
-      }
-      if (b.dataset.s === 'share') {
-        if (navigator.share) {
-          try {
-            await navigator.share({ title: 'Join our Restock list', text: `Our shared grocery list. Invite code:\n${code}`, url: link });
-          } catch {}
-        } else {
-          await navigator.clipboard.writeText(link);
-          toast('Link copied');
-        }
-      }
-    };
+      });
   });
 }
 
 // ---------- events ----------
 
-app.addEventListener('click', (e) => {
+function onAction(e) {
   const b = e.target.closest('[data-act]');
   if (!b) return;
   const { act, id } = b.dataset;
@@ -968,31 +1263,42 @@ app.addEventListener('click', (e) => {
       return switchTab(b.dataset.tab);
     case 'buy':
       return buy(id);
+    case 'tilebuy':
+      b.classList.add('done');
+      return setTimeout(() => buy(id), 260);
     case 'undo':
       return S.undoPurchase(id);
-    case 'rowmenu':
-      return rowMenu(id);
+    case 'detail':
+      return itemDetail(id);
     case 'need':
       S.setNeeded(id, true);
-      return toast(`${store.data.items[id].name} added to list`);
+      return toast(`${store.data.items[id].name} added to your list`);
     case 'unneed': {
       const st = S.status(store.data.items[id]);
       if (st.kind === 'needed') S.setNeeded(id, false);
-      else {
-        S.snooze(id);
-        toast('Hidden from list for now');
-      }
-      return;
+      else S.snooze(id);
+      return toast(`${store.data.items[id].name} removed from list`, { icon: '−' });
     }
     case 'addcoming': {
       const { coming } = computeList();
       coming.forEach((c) => S.setNeeded(c.item.id, true));
-      return toast(`${coming.length} added`);
+      return toast(`${coming.length} item${coming.length > 1 ? 's' : ''} added`);
     }
-    case 'edit':
-      return itemSheet(id);
+    case 'quick':
+      toggleQuick(id);
+      return refreshAddPanel();
+    case 'adddone':
+      return exitAdding();
+    case 'createitem': {
+      const name = ui.addQuery.trim();
+      ui.addQuery = '';
+      if ($('#quickadd')) $('#quickadd').value = '';
+      refreshAddPanel();
+      document.activeElement?.blur();
+      return createSheet(name, { needed: true });
+    }
     case 'newitem':
-      return itemSheet(null, b.dataset.name || '');
+      return createSheet(b.dataset.name || '', { needed: false });
     case 'filter':
       ui.filter = b.dataset.f;
       return render();
@@ -1000,75 +1306,67 @@ app.addEventListener('click', (e) => {
       return mealSheet(id);
     case 'newmeal':
       return mealEditor(null);
+    case 'viewmenu':
+      return viewMenu();
     case 'look':
       return S.saveDevice({ lookahead: Math.min(7, Math.max(1, store.device.lookahead + +b.dataset.d)) });
-    case 'viewmenu': {
-      const cur = store.device.listView || 'list';
-      const opt = (k, l) => ({ label: `${l}${cur === k ? '  ✓' : ''}`, run: () => S.saveDevice({ listView: k }) });
-      return actionSheet('View shopping list as', [opt('list', 'List'), opt('grid', 'Grid'), opt('compact', 'Compact')]);
-    }
-    case 'addsug': {
-      S.setNeeded(id, true);
-      ui.addQuery = '';
-      toast(`${store.data.items[id].name} added`);
-      return render();
-    }
-    case 'clearadd':
-      ui.addQuery = '';
-      render();
-      return $('#quickadd')?.focus();
-    case 'createitem': {
-      const name = ui.addQuery.trim();
-      ui.addQuery = '';
-      render();
-      return itemSheet(null, name, true);
-    }
-    case 'noop':
-      return;
+    case 'aisles':
+      return aislesSheet();
+    case 'sync':
+      return syncSheet();
+    case 'data':
+      return dataSheet();
     case 'dismissa2hs':
       localSet('restock.a2hsDismissed', '1');
       return render();
-    case 'dismisssync':
-      return S.saveDevice({ dismissedSyncCard: true });
-    case 'join':
-      return joinSheet();
-    case 'setup':
-      return setupSheet();
-    case 'invite':
-      return inviteSheet();
-    case 'syncnow':
-      return syncNow();
-    case 'disconnect':
-      if (confirm('Stop syncing on this phone? Your data stays here.')) disconnect();
-      return;
-    case 'catup':
-      return S.moveCategory(id, -1);
-    case 'catdown':
-      return S.moveCategory(id, 1);
-    case 'renamecat':
-      return categorySheet(id);
-    case 'addcat': {
-      const name = prompt('New category');
-      if (name && name.trim()) S.addCategory(name.trim());
-      return;
-    }
-    case 'export':
-      return exportData();
-    case 'reset':
-      if (confirm('Reset to the starting list? This replaces items, meals and history on this phone.')) S.resetData();
-      return;
+  }
+}
+app.addEventListener('click', onAction);
+tabbar.addEventListener('click', onAction);
+
+app.addEventListener('focusin', (e) => {
+  if (e.target.id === 'quickadd' && !ui.adding) {
+    ui.adding = true;
+    render();
+    window.scrollTo({ top: 0 });
   }
 });
 
-app.addEventListener('submit', (e) => {
-  e.preventDefault();
-  if (e.target.dataset.form !== 'quickadd') return;
-  const top = searchItems(ui.addQuery).find((i) => !['needed', 'due'].includes(S.status(i).kind));
-  if (!top) return;
-  S.setNeeded(top.id, true);
-  ui.addQuery = '';
-  toast(`${top.name} added`);
-  render();
+app.addEventListener('input', (e) => {
+  if (e.target.id === 'itemsearch') {
+    ui.query = e.target.value;
+    $('#itemsresults').innerHTML = itemsResults();
+  }
+  if (e.target.id === 'quickadd') {
+    ui.addQuery = e.target.value;
+    refreshAddPanel();
+  }
+});
+
+app.addEventListener('keydown', (e) => {
+  if (e.target.id === 'quickadd' && e.key === 'Enter') {
+    e.preventDefault();
+    const q = ui.addQuery.trim();
+    if (!q) return exitAdding();
+    const top = searchItems(q).find((i) => !onListKind(S.status(i).kind));
+    if (top) {
+      toggleQuick(top.id);
+      ui.addQuery = '';
+      e.target.value = '';
+      refreshAddPanel();
+      toast(`${top.name} added`);
+    } else if (!S.findItemByName(q)) {
+      ui.addQuery = '';
+      e.target.value = '';
+      e.target.blur();
+      createSheet(q, { needed: true });
+    }
+  }
+  if (e.target.id === 'devname' && e.key === 'Enter') e.target.blur();
+});
+
+app.addEventListener('change', (e) => {
+  if (e.target.id === 'devname') S.saveDevice({ name: e.target.value.trim() });
 });
 
 // Keep the keyboard up while tapping suggestions.
@@ -1076,7 +1374,7 @@ app.addEventListener('mousedown', (e) => {
   if (e.target.closest('[data-keepfocus]')) e.preventDefault();
 });
 
-// Long press (grid tiles): open the item menu instead of checking it off.
+// Long press on grid tiles opens details instead of checking off.
 let press = null;
 app.addEventListener('pointerdown', (e) => {
   const el = e.target.closest('[data-long]');
@@ -1086,8 +1384,8 @@ app.addEventListener('pointerdown', (e) => {
     press.fired = true;
     el.classList.add('pressed');
     setTimeout(() => el.classList.remove('pressed'), 200);
-    rowMenu(el.dataset.id);
-  }, 450);
+    itemDetail(el.dataset.id);
+  }, 420);
 });
 app.addEventListener('pointermove', (e) => {
   if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) clearTimeout(press.timer);
@@ -1108,61 +1406,14 @@ app.addEventListener(
   true,
 );
 
-app.addEventListener('input', (e) => {
-  if (e.target.id === 'itemsearch') {
-    ui.query = e.target.value;
-    render();
-  }
-  if (e.target.id === 'quickadd') {
-    ui.addQuery = e.target.value;
-    render();
-  }
-});
-
-app.addEventListener('change', async (e) => {
-  if (e.target.id === 'devname') S.saveDevice({ name: e.target.value.trim() });
-  if (e.target.id === 'importfile') {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      if (!data.items) throw new Error();
-      S.importData(data);
-      toast('Backup imported');
-    } catch {
-      toast('That file is not a Restock backup');
-    }
-  }
-});
-
-async function exportData() {
-  const json = JSON.stringify(store.data, null, 1);
-  const name = `restock-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  const file = new File([json], name, { type: 'application/json' });
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file], title: name });
-      return;
-    } catch {}
-  }
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(file);
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
 // ---------- boot ----------
 
 S.subscribe(scheduleRender);
 onSyncChange(scheduleRender);
 render();
 startSync();
-
-// Re-render at midnight-ish and every minute so "today/tomorrow" stays right.
 setInterval(scheduleRender, 60000);
 
-// Invite link: #join=RS1....
 function checkInviteLink() {
   const m = location.hash.match(/join=(RS1\.[A-Za-z0-9+/_-]+)/);
   if (!m) return;
@@ -1172,8 +1423,6 @@ function checkInviteLink() {
 checkInviteLink();
 window.addEventListener('hashchange', checkInviteLink);
 
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('./sw.js');
-}
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('./sw.js');
 
-window.__restock = { store, S }; // handy for debugging
+window.__restock = { store, S, ui };

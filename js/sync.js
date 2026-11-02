@@ -9,7 +9,10 @@ const PUSH_DELAY_MS = 2500;
 
 export const syncState = { status: 'off', lastSync: null, error: null };
 const listeners = new Set();
-export const onSyncChange = (fn) => listeners.add(fn);
+export const onSyncChange = (fn) => {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+};
 function set(patch) {
   Object.assign(syncState, patch);
   listeners.forEach((fn) => fn());

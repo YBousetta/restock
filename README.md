@@ -11,9 +11,11 @@ No App Store, no install: it's a web app you add to your home screen.
 - **Coming up** shows what runs out in the next few days, so you can grab it now and skip a trip.
 - **Still have some** hides an item for a while without counting it as bought.
 - **Meals**: open a meal and add its missing ingredients in one tap.
-- **Add from your items**: search the catalog from the list page; suggestions appear as you type.
-- **Three list views** (button top right): List, Grid (big tiles, tap to check off, hold for options), Compact.
-- **Aisle order**: categories are sorted the way you walk through the store, each with an icon you can change (Settings).
+- **Grid view** by default: tap a tile when it's in the cart, hold it for details. List and Compact views via the top-right button.
+- **Adding**: tap "Add an item" for one-tap chips (running low, staples), search your items, or create a new one.
+  New items get a guessed icon, category and rhythm from their name (`js/knowledge.js`).
+- **Item details**: stock meter, add/bought/still-have actions, rhythm settings, learned insight, purchase history.
+- **Settings**: name, list style, look-ahead, aisle order (drag to reorder), partner sync, backup.
 
 ### Learning
 Each "Learn" item starts from its guessed interval. Every time you buy it, the gap since the last

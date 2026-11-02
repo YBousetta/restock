@@ -214,3 +214,18 @@ export function addCategory(name) {
   emit(true);
   return id;
 }
+
+export function setCategoryOrder(ids) {
+  ids.forEach((id, k) => {
+    const c = store.data.categories[id];
+    if (c && c.order !== k) store.data.categories[id] = touch({ ...c, order: k });
+  });
+  emit(true);
+}
+
+// How many times each item was bought (for "frequently bought" suggestions).
+export function purchaseCounts() {
+  const counts = {};
+  for (const p of live(store.data.purchases)) counts[p.itemId] = (counts[p.itemId] || 0) + 1;
+  return counts;
+}
