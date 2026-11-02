@@ -198,6 +198,11 @@ export function moveCategory(id, dir) {
   emit(true);
 }
 
+export function updateCategory(id, patch) {
+  store.data.categories[id] = touch({ ...store.data.categories[id], ...patch });
+  emit(true);
+}
+
 export function renameCategory(id, name) {
   store.data.categories[id] = touch({ ...store.data.categories[id], name });
   emit(true);

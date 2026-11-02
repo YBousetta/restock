@@ -2,9 +2,10 @@ import * as S from './store.js';
 import { store } from './store.js';
 import { icons } from './icons.js';
 import { formatDays, formatInterval } from './predict.js';
+import { CATEGORY_ICONS, ICON_CHOICES, guessItemIcon } from './emoji.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -12,6 +13,7 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const ui = {
   tab: localGet('restock.tab') || 'list',
   query: '',
+  addQuery: '',
   filter: 'all',
   showComing: true,
   scroll: {},
@@ -50,6 +52,45 @@ function groupByCategory(entries) {
 }
 
 const byName = (a, b) => a.item.name.localeCompare(b.item.name);
+
+function catIcon(id) {
+  return store.data.categories[id]?.icon || CATEGORY_ICONS[id] || '📦';
+}
+function itemIcon(item) {
+  return item.icon || guessItemIcon(item.name) || catIcon(item.cat);
+}
+function sectionHeader(cat, extra = '') {
+  return `<div class="section-header"><span class="cat-head"><span class="cat-icon">${catIcon(cat)}</span>${esc(catName(cat))}</span>${extra}</div>`;
+}
+
+const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+// Catalog search: name starts with query > a word starts with it > contains it.
+function searchItems(q, limit = 8) {
+  const n = norm(q.trim());
+  if (!n) return [];
+  const scored = [];
+  for (const item of S.items()) {
+    const name = norm(item.name);
+    let score = -1;
+    if (name.startsWith(n)) score = 0;
+    else if (name.split(/[^a-z0-9]+/).some((w) => w.startsWith(n))) score = 1;
+    else if (name.includes(n)) score = 2;
+    if (score >= 0) scored.push({ item, score });
+  }
+  scored.sort((a, b) => a.score - b.score || a.item.name.localeCompare(b.item.name));
+  return scored.slice(0, limit).map((x) => x.item);
+}
+
+const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function shortDue(st) {
+  if (st.kind === 'needed') return '';
+  if (st.daysLeft == null) return '';
+  if (st.daysLeft === 0) return 'today';
+  if (st.daysLeft < 0) return `${-st.daysLeft}d late`;
+  return `${st.daysLeft}d`;
+}
 
 function reasonText(st, item) {
   if (st.kind === 'needed') return item.mode === 'none' ? 'On list' : `On list · ${freqText(st, item)}`;
@@ -111,14 +152,70 @@ function syncBadge() {
   return `<span class="sync-badge"><span class="dot ${cls}"></span>${label}</span>`;
 }
 
+function addBar() {
+  const q = ui.addQuery;
+  let html = `<form class="search addbar" data-form="quickadd">${icons.search}<input id="quickadd" type="text" placeholder="Add from your items" value="${esc(q)}" autocomplete="off" autocorrect="off" enterkeyhint="done">
+    ${q ? `<button type="button" class="clear" data-act="clearadd" aria-label="Clear">✕</button>` : ''}</form>`;
+  if (!q.trim()) return html;
+  const results = searchItems(q);
+  html += `<div class="group suggestions">`;
+  for (const item of results) {
+    const st = S.status(item);
+    const onList = st.kind === 'needed' || st.kind === 'due';
+    html += `<button class="row tappable" data-act="${onList ? 'noop' : 'addsug'}" data-id="${item.id}" data-keepfocus>
+      <span class="item-icon">${itemIcon(item)}</span>
+      <div class="body"><div class="title">${esc(item.name)}</div><div class="sub">${esc(catName(item.cat))} · ${onList ? 'already on list' : st.daysLeft == null ? 'as needed' : dueLabel(st)}</div></div>
+      <span class="sug-add" style="color:${onList ? 'var(--tint)' : 'var(--label3)'}">${onList ? icons.checkCircle : icons.plusCircle}</span></button>`;
+  }
+  if (!results.length) {
+    html += `<div class="row"><div class="body"><div class="title" style="color:var(--label2)">No item called “${esc(q.trim())}”</div></div></div>`;
+  }
+  html += `<button class="row tappable action" data-act="createitem" data-keepfocus><span class="item-icon">${icons.plus}</span><div class="body">Create “${esc(q.trim())}” as a new item</div></button></div>`;
+  return html;
+}
+
+function buyRow(item, st, compact) {
+  if (compact) {
+    return `<div class="row has-check compact">
+      <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
+      <button class="body" data-act="rowmenu" data-id="${item.id}"><div class="title">${esc(item.name)}</div></button>
+      <span class="detail small ${st.daysLeft != null && st.daysLeft <= 0 && st.kind !== 'needed' ? 'due' : ''}">${shortDue(st)}</span></div>`;
+  }
+  return `<div class="row has-check">
+    <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
+    <button class="body" data-act="rowmenu" data-id="${item.id}">
+      <div class="title">${esc(item.name)}</div>
+      <div class="sub">${reasonText(st, item)}</div>
+    </button></div>`;
+}
+
+function buyTile(item, st) {
+  const late = st.kind === 'due' && st.daysLeft < 0;
+  return `<button class="tile" data-act="buy" data-long="rowmenu" data-id="${item.id}">
+    <span class="tile-icon">${itemIcon(item)}</span>
+    <span class="tile-name">${esc(item.name)}</span>
+    <span class="tile-sub ${late || st.daysLeft === 0 ? 'due' : ''}">${st.kind === 'needed' ? 'on list' : st.daysLeft === 0 ? 'due today' : late ? `${-st.daysLeft}d late` : ''}</span>
+  </button>`;
+}
+
 function listView() {
   const { toBuy, coming, bought } = computeList();
+  const mode = store.device.listView || 'list';
+  const compact = mode === 'compact';
   let html = `<h1 class="large-title">Shopping List</h1>
-    <p class="subtitle">${toBuy.length ? `${toBuy.length} to buy` : 'Nothing due'} ${syncState.status !== 'off' ? ' · ' + syncBadge() : ''}</p>
-    <form class="search" data-form="quickadd">${icons.plus}<input id="quickadd" type="text" placeholder="Add an item" autocomplete="off" enterkeyhint="done" list="catalog"></form>
-    <datalist id="catalog">${S.items()
-      .map((i) => `<option value="${esc(i.name)}">`)
-      .join('')}</datalist>`;
+    <p class="subtitle">${toBuy.length ? `${toBuy.length} to buy` : 'Nothing due'} ${syncState.status !== 'off' ? ' · ' + syncBadge() : ''}</p>`;
+
+  if (isIOS() && !isStandalone() && !localGet('restock.a2hsDismissed')) {
+    html += `<div class="card a2hs"><h4>Open Restock full screen</h4>
+      <ol class="steps"><li>Tap <b>Share</b> ${icons.share.replace('<svg', '<svg width="16" height="16" style="vertical-align:-2px"')} in Safari</li>
+      <li>Tap <b>Add to Home Screen</b> and keep <b>Open as Web App</b> on</li>
+      <li>Open <b>Restock</b> from your Home Screen</li></ol>
+      <p style="margin:0;font-size:13px">Safari doesn't let websites hide its own bars, so the full-screen app lives on your Home Screen. Set up sync from there: it keeps its own data, separate from Safari.</p>
+      <button class="nav-btn" data-act="dismissa2hs" style="margin:4px auto 0;display:flex;color:var(--label2);font-size:15px">Dismiss</button></div>`;
+  }
+
+  html += addBar();
+  if (ui.addQuery.trim()) return html; // while searching, suggestions take over the screen
 
   if (!toBuy.length && !bought.length) {
     const next = S.items()
@@ -126,43 +223,44 @@ function listView() {
       .filter((e) => e.st.daysLeft != null)
       .sort((a, b) => a.st.daysLeft - b.st.daysLeft)[0];
     html += `<div class="empty"><div class="big">✓</div><h3>All stocked up</h3>
-      <p>${next ? `Next up: <b>${esc(next.item.name)}</b>, ${formatDays(next.st.daysLeft)}.` : 'Add items above or from the Items tab.'}</p></div>`;
+      <p>${next ? `Next up: <b>${esc(next.item.name)}</b>, ${formatDays(next.st.daysLeft)}.` : 'Search above to add items.'}</p></div>`;
   }
 
-  for (const [cat, list] of groupByCategory(toBuy)) {
-    html += `<div class="section-header">${esc(catName(cat))}</div><div class="group">`;
-    for (const { item, st } of list.sort(byName)) {
-      html += `<div class="row has-check" data-row="${item.id}">
-        <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
-        <button class="body" data-act="rowmenu" data-id="${item.id}">
-          <div class="title">${esc(item.name)}</div>
-          <div class="sub">${reasonText(st, item)}</div>
-        </button></div>`;
+  if (mode === 'grid' && toBuy.length) {
+    // One continuous grid in aisle order: denser than splitting tiles per category.
+    const tiles = groupByCategory(toBuy).flatMap(([, list]) => list.sort(byName));
+    html += `<div class="grid" style="margin-top:14px">${tiles.map((e) => buyTile(e.item, e.st)).join('')}</div>
+      <p class="section-footer">In aisle order · tap to check off · hold for options</p>`;
+  } else {
+    for (const [cat, list] of groupByCategory(toBuy)) {
+      html += sectionHeader(cat, compact ? `<span class="count">${list.length}</span>` : '');
+      html += `<div class="group">${list.sort(byName).map((e) => buyRow(e.item, e.st, compact)).join('')}</div>`;
     }
-    html += `</div>`;
   }
 
   if (coming.length) {
     html += `<div class="section-header"><span>Coming up · next ${store.device.lookahead} day${store.device.lookahead > 1 ? 's' : ''}</span>
       <button data-act="addcoming">Add all</button></div><div class="group">`;
     for (const { item, st } of coming) {
-      html += `<div class="row">
-        <span class="dot soon"></span>
+      html += `<div class="row ${compact ? 'compact' : ''}">
+        <span class="item-icon ${compact ? 'sm' : ''}">${itemIcon(item)}</span>
         <button class="body" data-act="rowmenu" data-id="${item.id}"><div class="title">${esc(item.name)}</div>
-          <div class="sub">${freqText(st, item)}</div></button>
-        <span class="detail">${formatDays(st.daysLeft)}</span>
+          ${compact ? '' : `<div class="sub">${freqText(st, item)}</div>`}</button>
+        <span class="detail ${compact ? 'small' : ''}">${formatDays(st.daysLeft)}</span>
         <button class="nav-btn" data-act="need" data-id="${item.id}" aria-label="Add to list">${icons.plusCircle}</button></div>`;
     }
-    html += `</div><p class="section-footer">Based on how often you buy them. Add them now to save a trip.</p>`;
+    html += `</div>${compact ? '' : '<p class="section-footer">Based on how often you buy them. Add them now to save a trip.</p>'}`;
   }
 
   if (bought.length) {
     html += `<div class="section-header">Bought today</div><div class="group">`;
     for (const { item, p } of bought) {
-      html += `<div class="row has-check checked">
+      const time = new Date(p.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      html += `<div class="row has-check checked ${compact ? 'compact' : ''}">
         <button class="check-hit" data-act="undo" data-id="${p.id}" aria-label="Undo"><span class="check">${icons.check}</span></button>
         <div class="body"><div class="title">${esc(item.name)}</div>
-        <div class="sub">${p.by ? esc(p.by) + ' · ' : ''}${new Date(p.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div></div></div>`;
+        ${compact ? '' : `<div class="sub">${p.by ? esc(p.by) + ' · ' : ''}${time}</div>`}</div>
+        ${compact ? `<span class="detail small">${time}</span>` : ''}</div>`;
     }
     html += `</div>`;
   }
@@ -202,7 +300,7 @@ function itemsView() {
   }
 
   for (const [cat, list] of groupByCategory(entries)) {
-    html += `<div class="section-header">${esc(catName(cat))}</div><div class="group">`;
+    html += sectionHeader(cat) + `<div class="group">`;
     for (const { item, st } of list.sort(byName)) {
       const onList = st.kind === 'needed' || st.kind === 'due';
       html += `<div class="row">
@@ -272,11 +370,11 @@ function settingsView() {
 
   html += `<div class="section-header"><span>Aisle order</span><button data-act="addcat">Add</button></div><div class="group">`;
   cats.forEach((c, i) => {
-    html += `<div class="row"><button class="body" data-act="renamecat" data-id="${c.id}"><div class="title">${esc(c.name)}</div></button>
+    html += `<div class="row"><span class="cat-icon lg">${catIcon(c.id)}</span><button class="body" data-act="renamecat" data-id="${c.id}"><div class="title">${esc(c.name)}</div></button>
       <button class="nav-btn" data-act="catup" data-id="${c.id}" ${i === 0 ? 'disabled style="opacity:.25"' : ''} aria-label="Move up">${icons.up}</button>
       <button class="nav-btn" data-act="catdown" data-id="${c.id}" ${i === cats.length - 1 ? 'disabled style="opacity:.25"' : ''} aria-label="Move down">${icons.down}</button></div>`;
   });
-  html += `</div><p class="section-footer">Order categories the way you walk through your supermarket. Tap a name to rename it.</p>
+  html += `</div><p class="section-footer">Order categories the way you walk through your supermarket. Tap a name to rename it or change its icon.</p>
 
     <div class="section-header">Data</div>
     <div class="group">
@@ -297,8 +395,11 @@ function render() {
   const focus = active && active.id && app.contains(active) ? { id: active.id, start: active.selectionStart, end: active.selectionEnd, value: active.value } : null;
 
   const view = { list: listView, items: itemsView, meals: mealsView, settings: settingsView }[ui.tab]();
+  const viewIcon = { list: icons.viewList, grid: icons.viewGrid, compact: icons.viewCompact }[store.device.listView || 'list'];
   const right =
-    ui.tab === 'items'
+    ui.tab === 'list'
+      ? `<button class="nav-btn" data-act="viewmenu" aria-label="Change view">${viewIcon}</button>`
+      : ui.tab === 'items'
       ? `<button class="nav-btn" data-act="newitem" aria-label="New item">${icons.plus}</button>`
       : ui.tab === 'meals'
         ? `<button class="nav-btn" data-act="newmeal" aria-label="New meal">${icons.plus}</button>`
@@ -324,10 +425,11 @@ function render() {
   if (focus) {
     const el = document.getElementById(focus.id);
     if (el) {
-      el.value = focus.value;
       el.focus({ preventScroll: true });
       try {
-        el.setSelectionRange(focus.start, focus.end);
+        const len = el.value.length;
+        if (el.value === focus.value) el.setSelectionRange(focus.start, focus.end);
+        else el.setSelectionRange(len, len);
       } catch {}
     }
   }
@@ -465,10 +567,10 @@ function stepperRow(label, sub, value, act) {
     <div class="stepper"><button data-s="${act}" data-d="-1">−</button><button data-s="${act}" data-d="1">+</button></div></div>`;
 }
 
-function itemSheet(id, presetName = '') {
+function itemSheet(id, presetName = '', presetNeeded = false) {
   const isNew = !id;
-  const src = isNew ? { name: presetName, cat: 'other', mode: 'auto', interval: 7, needed: false } : store.data.items[id];
-  const draft = { name: src.name, cat: src.cat, mode: src.mode, interval: src.interval || 7 };
+  const src = isNew ? { name: presetName, cat: 'other', mode: 'auto', interval: 7, needed: presetNeeded } : store.data.items[id];
+  const draft = { name: src.name, cat: src.cat, mode: src.mode, interval: src.interval || 7, needed: !!src.needed };
 
   openSheet((ctx) => {
     const item = isNew ? null : store.data.items[id];
@@ -571,6 +673,38 @@ function itemSheet(id, presetName = '') {
         return;
       }
       ctx.rerender();
+    };
+  });
+}
+
+function categorySheet(id) {
+  const cat = store.data.categories[id];
+  const draft = { name: cat.name, icon: catIcon(id) };
+  openSheet((ctx) => {
+    ctx.sheet.innerHTML = `<div class="grabber"></div>
+      <div class="sheet-head"><button class="nav-btn" data-s="cancel">Cancel</button><h2>Category</h2>
+        <button class="nav-btn" data-s="save" style="font-weight:600">Done</button></div>
+      <div class="sheet-body">
+        <div class="cat-preview">${draft.icon}</div>
+        <div class="group"><label class="row"><input type="text" id="catname" value="${esc(draft.name)}" placeholder="Name" autocomplete="off"></label></div>
+        <div class="section-header">Icon</div>
+        <div class="icon-grid">${ICON_CHOICES.map((ic) => `<button class="${ic === draft.icon ? 'on' : ''}" data-s="icon" data-ic="${ic}">${ic}</button>`).join('')}</div>
+      </div>`;
+    ctx.sheet.oninput = (e) => {
+      if (e.target.id === 'catname') draft.name = e.target.value;
+    };
+    ctx.sheet.onclick = (e) => {
+      const b = e.target.closest('[data-s]');
+      if (!b) return;
+      if (b.dataset.s === 'cancel') return ctx.close();
+      if (b.dataset.s === 'icon') {
+        draft.icon = b.dataset.ic;
+        return ctx.rerender();
+      }
+      if (b.dataset.s === 'save') {
+        if (draft.name.trim()) S.updateCategory(id, { name: draft.name.trim(), icon: draft.icon });
+        ctx.close();
+      }
     };
   });
 }
@@ -868,6 +1002,32 @@ app.addEventListener('click', (e) => {
       return mealEditor(null);
     case 'look':
       return S.saveDevice({ lookahead: Math.min(7, Math.max(1, store.device.lookahead + +b.dataset.d)) });
+    case 'viewmenu': {
+      const cur = store.device.listView || 'list';
+      const opt = (k, l) => ({ label: `${l}${cur === k ? '  ✓' : ''}`, run: () => S.saveDevice({ listView: k }) });
+      return actionSheet('View shopping list as', [opt('list', 'List'), opt('grid', 'Grid'), opt('compact', 'Compact')]);
+    }
+    case 'addsug': {
+      S.setNeeded(id, true);
+      ui.addQuery = '';
+      toast(`${store.data.items[id].name} added`);
+      return render();
+    }
+    case 'clearadd':
+      ui.addQuery = '';
+      render();
+      return $('#quickadd')?.focus();
+    case 'createitem': {
+      const name = ui.addQuery.trim();
+      ui.addQuery = '';
+      render();
+      return itemSheet(null, name, true);
+    }
+    case 'noop':
+      return;
+    case 'dismissa2hs':
+      localSet('restock.a2hsDismissed', '1');
+      return render();
     case 'dismisssync':
       return S.saveDevice({ dismissedSyncCard: true });
     case 'join':
@@ -885,11 +1045,8 @@ app.addEventListener('click', (e) => {
       return S.moveCategory(id, -1);
     case 'catdown':
       return S.moveCategory(id, 1);
-    case 'renamecat': {
-      const name = prompt('Category name', store.data.categories[id].name);
-      if (name && name.trim()) S.renameCategory(id, name.trim());
-      return;
-    }
+    case 'renamecat':
+      return categorySheet(id);
     case 'addcat': {
       const name = prompt('New category');
       if (name && name.trim()) S.addCategory(name.trim());
@@ -906,19 +1063,58 @@ app.addEventListener('click', (e) => {
 app.addEventListener('submit', (e) => {
   e.preventDefault();
   if (e.target.dataset.form !== 'quickadd') return;
-  const input = $('#quickadd');
-  const name = input.value.trim();
-  if (!name) return;
-  const existing = S.findItemByName(name);
-  if (existing) S.setNeeded(existing.id, true);
-  else S.addItem({ name, cat: 'other', mode: 'none', needed: true });
-  input.value = '';
-  toast(existing ? `${existing.name} added` : `${name} added to Other. Edit it in Items.`);
+  const top = searchItems(ui.addQuery).find((i) => !['needed', 'due'].includes(S.status(i).kind));
+  if (!top) return;
+  S.setNeeded(top.id, true);
+  ui.addQuery = '';
+  toast(`${top.name} added`);
+  render();
 });
+
+// Keep the keyboard up while tapping suggestions.
+app.addEventListener('mousedown', (e) => {
+  if (e.target.closest('[data-keepfocus]')) e.preventDefault();
+});
+
+// Long press (grid tiles): open the item menu instead of checking it off.
+let press = null;
+app.addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('[data-long]');
+  if (!el) return;
+  press = { el, x: e.clientX, y: e.clientY, fired: false };
+  press.timer = setTimeout(() => {
+    press.fired = true;
+    el.classList.add('pressed');
+    setTimeout(() => el.classList.remove('pressed'), 200);
+    rowMenu(el.dataset.id);
+  }, 450);
+});
+app.addEventListener('pointermove', (e) => {
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) clearTimeout(press.timer);
+});
+['pointerup', 'pointercancel'].forEach((t) => app.addEventListener(t, () => press && clearTimeout(press.timer)));
+app.addEventListener('contextmenu', (e) => {
+  if (e.target.closest('[data-long]')) e.preventDefault();
+});
+app.addEventListener(
+  'click',
+  (e) => {
+    if (press?.fired && press.el.contains(e.target)) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    press = null;
+  },
+  true,
+);
 
 app.addEventListener('input', (e) => {
   if (e.target.id === 'itemsearch') {
     ui.query = e.target.value;
+    render();
+  }
+  if (e.target.id === 'quickadd') {
+    ui.addQuery = e.target.value;
     render();
   }
 });

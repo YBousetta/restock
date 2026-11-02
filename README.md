@@ -11,7 +11,9 @@ No App Store, no install: it's a web app you add to your home screen.
 - **Coming up** shows what runs out in the next few days, so you can grab it now and skip a trip.
 - **Still have some** hides an item for a while without counting it as bought.
 - **Meals**: open a meal and add its missing ingredients in one tap.
-- **Aisle order**: categories are sorted the way you walk through the store (Settings).
+- **Add from your items**: search the catalog from the list page; suggestions appear as you type.
+- **Three list views** (button top right): List, Grid (big tiles, tap to check off, hold for options), Compact.
+- **Aisle order**: categories are sorted the way you walk through the store, each with an icon you can change (Settings).
 
 ### Learning
 Each "Learn" item starts from its guessed interval. Every time you buy it, the gap since the last
