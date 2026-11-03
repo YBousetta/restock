@@ -548,3 +548,13 @@ body.simple .hero-row .hero-icon { display: none; }
 .rhythm-card.custom span { font-size: 15px; font-weight: 600; color: var(--tint); }
 .rhythm-card.custom .days-input { width: 48px; height: 34px; font-size: 18px; }
 .days-input::placeholder { color: var(--label3); }
+
+/* ---------- v1.7.1: dividers start where the row's text starts ---------- */
+.row { --inset: 14px; }
+.row:has(> .item-icon) { --inset: 56px; }
+.row.has-check { --inset: 50px; }
+.row.has-check:has(> .item-icon) { --inset: 92px; }
+.srow { --inset: 58px; }
+.timeline .row { --inset: 34px; }
+body.simple .row:has(> .item-icon), body.simple .srow { --inset: 14px; }
+body.simple .row.has-check, body.simple .row.has-check:has(> .item-icon) { --inset: 50px; }
