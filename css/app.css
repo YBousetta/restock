@@ -532,3 +532,19 @@ body.simple .hero-row .hero-icon { display: none; }
 .rhythm-card.custom .days-field { font-size: 14px; color: var(--label2); gap: 4px; align-items: center; }
 .rhythm-card.custom .days-input { width: 40px; height: 32px; background: rgba(0, 0, 0, 0.25); }
 .days-input { color: var(--label); }
+
+/* ---------- v1.7: floating add button, Custom = just the day box ---------- */
+.fab {
+  position: fixed; right: 18px; bottom: calc(56px + var(--safe-bottom) + 16px); z-index: 15;
+  width: 56px; height: 56px; border-radius: 50%; background: var(--tint); color: #000;
+  display: grid; place-items: center; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s var(--spring);
+}
+.fab svg { width: 26px; height: 26px; stroke-width: 2.6; }
+.fab:active { transform: scale(0.9); }
+.view:has(+ .fab) { padding-bottom: 96px; }
+
+.rhythm-card.custom { justify-content: center; gap: 8px; padding: 8px 12px; cursor: text; }
+.rhythm-card.custom span { font-size: 15px; font-weight: 600; color: var(--tint); }
+.rhythm-card.custom .days-input { width: 48px; height: 34px; font-size: 18px; }
+.days-input::placeholder { color: var(--label3); }

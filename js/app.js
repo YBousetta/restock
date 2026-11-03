@@ -6,7 +6,7 @@ import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_ID
 import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 // SHA-256 of the backup passcode. This only keeps casual taps out: the app's code is public.
 const BACKUP_HASH = 'bfbe56885d33f05b961223170f34a0af243bd62f2d0d9d3dfdf4e3fa4058c968';
 
@@ -45,6 +45,8 @@ const itemIcon = (item) => item.icon || guessItemIcon(item.name) || catIcon(item
 const byName = (a, b) => a.item.name.localeCompare(b.item.name);
 const onListKind = (k) => k === 'needed' || k === 'due';
 const listMode = () => store.device.listView || 'grid';
+const itemsMode = () => store.device.itemsView || 'list';
+const mealsMode = () => store.device.mealsView || 'list';
 const meterColor = (l) => (l > 0.5 ? 'var(--green)' : l > 0.2 ? 'var(--orange)' : 'var(--red)');
 
 function groupByCategory(entries) {
@@ -58,7 +60,12 @@ function groupByCategory(entries) {
 }
 
 // ---------- collapsible category sections ----------
-const collapsed = (scope) => new Set((store.device.collapsed || {})[scope] || []);
+const DEFAULT_COLLAPSED = { itemsC: true }; // Items starts with every category folded
+function collapsed(scope) {
+  const saved = (store.device.collapsed || {})[scope];
+  if (saved === undefined && DEFAULT_COLLAPSED[scope]) return new Set(S.categories().map((c) => c.id));
+  return new Set(saved || []);
+}
 function setCollapsed(scope, ids) {
   S.saveDevice({ collapsed: { ...(store.device.collapsed || {}), [scope]: [...ids] } });
 }
@@ -289,7 +296,7 @@ function listView() {
   }
 
   if (bought.length) {
-    html += `<div class="section-header"><span>In the cart</span><button data-act="clearcart">Clear</button></div><div class="group">`;
+    html += `<div class="section-header"><span>Just bought</span><button data-act="clearcart">Clear</button></div><div class="group">`;
     for (const { item, p } of bought) {
       const time = new Date(p.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
       html += `<div class="row has-check checked compact">
@@ -316,12 +323,20 @@ function itemsResults() {
       ${q ? `<button class="btn secondary" data-act="newitem" data-name="${esc(ui.query)}">Create “${esc(ui.query)}”</button>` : ''}</div>`;
   }
   const groups = groupByCategory(entries);
-  let html = q ? '' : collapseBar('items', groups.map(([c]) => c), `${entries.length} items`);
+  let html = q ? '' : collapseBar('itemsC', groups.map(([c]) => c), `${entries.length} items`);
   for (const [cat, list] of groups) {
     let body = `<div class="group">`;
     for (const { item, st } of list.sort(byName)) {
       const on = onListKind(st.kind);
       const lvl = stockLevel(st);
+      const addBtn = `<button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>`;
+      if (itemsMode() === 'compact') {
+        const due = st.kind === 'needed' ? '' : st.daysLeft == null ? '' : st.daysLeft <= 0 ? '<span class="due">due</span>' : `${st.daysLeft}d`;
+        body += swipeRow(`<div class="row compact swipe-content">
+          <button class="body" data-act="detail" data-id="${item.id}"><div class="title">${esc(item.name)}</div></button>
+          <span class="detail small">${due}</span>${addBtn}</div>`, 'delitem', item.id, 'Delete');
+        continue;
+      }
       body += swipeRow(`<div class="row swipe-content">
         <span class="item-icon">${itemIcon(item)}</span>
         <button class="body" data-act="detail" data-id="${item.id}">
@@ -332,7 +347,7 @@ function itemsResults() {
         <button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>
       </div>`, 'delitem', item.id, 'Delete');
     }
-    html += catSection('items', cat, list.length, body + `</div>`, !!q);
+    html += catSection('itemsC', cat, list.length, body + `</div>`, !!q);
   }
   return html;
 }
@@ -391,6 +406,12 @@ const mealIcon = (cat) => MEAL_CATEGORIES.find(([k]) => k === cat)?.[2] || '🍽
 function mealRow(m) {
   const ings = (m.items || []).map((id) => store.data.items[id]).filter((i) => i && !i.deleted);
   const low = ings.filter((i) => ['needed', 'due', 'soon'].includes(S.status(i).kind)).length;
+  if (mealsMode() === 'compact') {
+    const r = `<button class="row tappable compact swipe-content" data-act="meal" data-id="${m.id}">
+      <div class="body"><div class="title">${esc(m.name)}</div></div>
+      <span class="detail small">${low ? `<span class="soon">${low} low</span> · ` : ''}${ings.length}</span><span class="chev">${icons.chevron}</span></button>`;
+    return swipeRow(r, 'delmeal', m.id, 'Delete');
+  }
   const row = `<button class="row tappable swipe-content" data-act="meal" data-id="${m.id}">
     <div class="body"><div class="title">${esc(m.name)}</div>
     <div class="sub">${ings.length} ingredient${ings.length === 1 ? '' : 's'}${low ? ` · <span class="soon">${low} low</span>` : ''}</div></div>
@@ -456,14 +477,21 @@ function render() {
   const view = { list: listView, items: itemsView, meals: mealsView, settings: settingsView }[ui.tab]();
   const viewIcon = { list: icons.viewList, grid: icons.viewGrid, compact: icons.viewCompact }[listMode()];
   document.body.classList.toggle('simple', !!store.device.simple);
+  const simpleIcon = (m) => (m === 'compact' ? icons.viewCompact : icons.viewList);
   const right =
     ui.tab === 'list'
       ? `<button class="nav-btn" data-act="viewmenu" aria-label="List style">${viewIcon}</button>`
       : ui.tab === 'items'
-        ? `<button class="nav-btn" data-act="newitem" aria-label="New item">${icons.plus}</button>`
+        ? `<button class="nav-btn" data-act="pagestyle" data-page="items" aria-label="List style">${simpleIcon(itemsMode())}</button>`
         : ui.tab === 'meals'
-          ? `<button class="nav-btn" data-act="newmeal" aria-label="New meal">${icons.plus}</button>`
+          ? `<button class="nav-btn" data-act="pagestyle" data-page="meals" aria-label="List style">${simpleIcon(mealsMode())}</button>`
           : '';
+  const fab =
+    ui.tab === 'items'
+      ? `<button class="fab" data-act="newitem" aria-label="New item">${icons.plus}</button>`
+      : ui.tab === 'meals'
+        ? `<button class="fab" data-act="newmeal" aria-label="New meal">${icons.plus}</button>`
+        : '';
   const badge = computeList().toBuy.length;
   const tabs = [
     ['list', 'Shopping list', icons.cart],
@@ -473,7 +501,7 @@ function render() {
   ];
   app.innerHTML = `
     <header class="navbar ${window.scrollY > 4 ? 'scrolled' : ''}"><h1 class="nav-title">${TITLES[ui.tab]}</h1><div class="right">${right}</div></header>
-    <main class="view">${view}</main>
+    <main class="view">${view}</main>${fab}
     `;
   tabbar.innerHTML = tabs
     .map(
@@ -548,14 +576,21 @@ function toggleQuick(id) {
 
 // ---------- shared sheet parts ----------
 
-function rhythmBlock(r) {
+function rhythmBlock(r, editing = false) {
   const isPreset = RHYTHM_OPTIONS.some(([k]) => k === r);
-  const sel = (k) => (k === 'custom' ? r !== null && !isPreset : k === r);
+  const custom = editing || (r !== null && !isPreset);
+  const sel = (k) => (k === 'custom' ? custom : !editing && k === r);
   return `<div class="rhythm-grid">${RHYTHM_OPTIONS.map(([k, l]) =>
-    k === 'custom' && sel(k)
-      ? `<div class="rhythm-card on custom"><b>${l}</b><label class="days-field"><input id="customdays" class="days-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="${r}" aria-label="Days" enterkeyhint="done" autocomplete="off">days</label></div>`
+    k === 'custom' && custom
+      ? `<label class="rhythm-card on custom"><input id="customdays" class="days-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="${editing ? '' : r}" placeholder="--" aria-label="Days" enterkeyhint="done" autocomplete="off"><span>days</span></label>`
       : `<button class="rhythm-card ${sel(k) ? 'on' : ''}" data-s="rhythm" data-k="${k}"><b>${l}</b></button>`,
   ).join('')}</div>`;
+}
+
+// Focus the day box right away so the keyboard opens in the same tap.
+function focusDays(root) {
+  const el = root.querySelector('#customdays');
+  if (el) el.focus();
 }
 
 function iconPicker(current, withAuto) {
@@ -576,7 +611,7 @@ function catPicker(current) {
 // ---------- item detail ----------
 
 function itemDetail(id) {
-  const local = { icon: false, cat: false };
+  const local = { icon: false, cat: false, customEdit: false };
   const ctx = openSheet(
     (ctx) => {
       const item = store.data.items[id];
@@ -635,7 +670,7 @@ function itemDetail(id) {
           </div>
 
           <div class="section-header">How often</div>
-          ${rhythmBlock(r)}
+          ${rhythmBlock(r, local.customEdit)}
           ${
             r !== null
               ? `<div class="group" style="margin-top:10px"><label class="row switch-row"><div class="body"><div class="title">Learn from my buying</div>
@@ -665,10 +700,21 @@ function itemDetail(id) {
   ctx.body.addEventListener('keydown', (e) => {
     if (e.target.id === 'dname' && e.key === 'Enter') e.target.blur();
   });
+  ctx.body.addEventListener('focusout', (e) => {
+    if (e.target.id === 'customdays' && !e.target.value && local.customEdit)
+      setTimeout(() => {
+        if (local.customEdit && !ctx.body.querySelector('#customdays')?.value) {
+          local.customEdit = false;
+          ctx.rerender();
+        }
+      }, 200);
+  });
   ctx.body.addEventListener('change', (e) => {
     if (e.target.id === 'customdays') {
       const v = parseInt(e.target.value, 10);
-      if (v >= 1 && v <= 99) S.updateItem(id, { interval: v });
+      const it = store.data.items[id];
+      if (v >= 1 && v <= 99) S.updateItem(id, { interval: v, mode: it.mode === 'none' ? 'auto' : it.mode });
+      local.customEdit = false;
       return ctx.rerender();
     }
     if (e.target.dataset.s === 'learn') {
@@ -712,8 +758,12 @@ function itemDetail(id) {
       const cur = item.mode === 'none' ? null : item.interval;
       const preset = RHYTHM_OPTIONS.some(([x]) => x === cur);
       if (k === 'null') S.updateItem(id, { mode: 'none' });
-      else if (k === 'custom') S.updateItem(id, { mode, interval: cur !== null && !preset ? cur : 10 });
-      else S.updateItem(id, { mode, interval: +k });
+      else if (k === 'custom') {
+        local.customEdit = true;
+        ctx.rerender();
+        return focusDays(ctx.body);
+      } else S.updateItem(id, { mode, interval: +k });
+      local.customEdit = false;
     }
     if (s === 'custom') S.updateItem(id, { interval: Math.min(99, Math.max(1, Math.round(item.interval) + +b.dataset.d)) });
     if (s === 'delete') {
@@ -739,7 +789,7 @@ const RHYTHM_OPTIONS = [
 ];
 
 function createSheet(presetName = '', { needed = true } = {}) {
-  const d = { name: presetName, cat: null, icon: null, rhythm: undefined, needed, pickIcon: false, pickCat: false };
+  const d = { name: presetName, cat: null, icon: null, rhythm: undefined, needed, pickIcon: false, pickCat: false, customEdit: false };
   const cat = () => d.cat || guessCategory(d.name, S.items()) || 'other';
   const rhythm = () => (d.rhythm !== undefined ? d.rhythm : (CATEGORY_RHYTHM[cat()] ?? null));
   const isPreset = (r) => RHYTHM_OPTIONS.some(([k]) => k === r);
@@ -782,7 +832,7 @@ function createSheet(presetName = '', { needed = true } = {}) {
       <button class="cat-select" data-s="togglecat"><b>${esc(catName(c))}</b><span class="cat-change">${d.pickCat ? 'Close' : 'Change'}</span></button>
       ${d.pickCat ? catPicker(c) : ''}
       <div class="section-header"><span>How often</span>${d.rhythm === undefined && name ? '<span class="auto-tag">✨ Suggested</span>' : ''}</div>
-      ${rhythmBlock(r)}
+      ${rhythmBlock(r, d.customEdit)}
       <div class="group" style="margin-top:16px"><label class="row switch-row"><div class="body"><div class="title">Add to shopping list now</div></div>
         <input type="checkbox" class="switch" data-s="needed" ${d.needed ? 'checked' : ''}></label></div>`;
     centerSelectedPill(body);
@@ -802,8 +852,18 @@ function createSheet(presetName = '', { needed = true } = {}) {
     if (e.target.id === 'customdays') {
       const v = parseInt(e.target.value, 10);
       if (v >= 1 && v <= 99) d.rhythm = v;
+      d.customEdit = false;
       paint();
     }
+  });
+  ctx.body.addEventListener('focusout', (e) => {
+    if (e.target.id === 'customdays' && !e.target.value && d.customEdit)
+      setTimeout(() => {
+        if (d.customEdit && !ctx.body.querySelector('#customdays')?.value) {
+          d.customEdit = false;
+          paint();
+        }
+      }, 200);
   });
   ctx.body.addEventListener('keydown', (e) => {
     if (e.target.id === 'cname' && e.key === 'Enter') {
@@ -828,7 +888,13 @@ function createSheet(presetName = '', { needed = true } = {}) {
     if (s === 'rhythm') {
       const k = b.dataset.k;
       const r = rhythm();
-      d.rhythm = k === 'null' ? null : k === 'custom' ? (r !== null && !isPreset(r) ? r : 10) : +k;
+      if (k === 'custom') {
+        d.customEdit = true;
+        paint();
+        return focusDays(ctx.body);
+      }
+      d.customEdit = false;
+      d.rhythm = k === 'null' ? null : +k;
     }
     if (s === 'custom') d.rhythm = Math.min(99, Math.max(1, rhythm() + +b.dataset.d));
     if (s === 'adddup') {
@@ -1167,6 +1233,13 @@ async function exportData() {
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function pageStyleMenu(page) {
+  const key = page === 'items' ? 'itemsView' : 'mealsView';
+  const cur = store.device[key] || 'list';
+  const opt = (k, l, ic) => ({ label: l, icon: ic, on: cur === k, run: () => S.saveDevice({ [key]: k }) });
+  actionSheet(`${page === 'items' ? 'Items' : 'Meals'} style`, [opt('list', 'List', icons.viewList), opt('compact', 'Compact', icons.viewCompact)]);
 }
 
 function viewMenu() {
@@ -1572,6 +1645,8 @@ function onAction(e) {
       S.deleteMeal(id);
       return toast(`${meal.name} deleted`, { icon: '🗑️', undo: () => S.saveMeal({ ...meal, deleted: false }) });
     }
+    case 'pagestyle':
+      return pageStyleMenu(b.dataset.page);
     case 'viewmenu':
       return viewMenu();
     case 'look':
