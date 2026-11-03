@@ -48,6 +48,7 @@ export function openSheet(build, { large = false } = {}) {
   sheet.className = 'sheet' + (large ? ' large' : '');
   sheet.innerHTML = `<div class="grabber"></div><div class="sheet-scroll"></div>`;
   const scroller = sheet.querySelector('.sheet-scroll');
+  document.querySelector('.toast')?.classList.remove('show');
   backdrop.style.zIndex = 40 + depth * 2;
   sheet.style.zIndex = 41 + depth * 2;
   document.body.append(backdrop, sheet);
@@ -197,4 +198,126 @@ export function actionSheet(title, actions) {
 
 export function confirmAction(title, label, run) {
   actionSheet(title, [{ label, red: true, run }]);
+}
+
+// ---------- swipe left on rows ----------
+// Markup: <div class="swipe-row"><button class="swipe-action" data-act=...>Delete</button><div class="swipe-content">…</div></div>
+// Swipe a little to reveal the button, swipe far to trigger it.
+export function enableSwipe(root) {
+  const W = 88;
+  let cur = null;
+  let openRow = null;
+  const closeRow = (row) => {
+    const c = row.querySelector('.swipe-content');
+    if (c) c.style.transform = '';
+    row.classList.remove('open', 'full');
+    setTimeout(() => !row.classList.contains('open') && row.classList.remove('swiping'), 320);
+    if (openRow === row) openRow = null;
+  };
+  root.addEventListener(
+    'touchstart',
+    (e) => {
+      const content = e.target.closest('.swipe-content');
+      if (openRow && !e.target.closest('.swipe-action') && (!content || content.parentElement !== openRow)) closeRow(openRow);
+      if (!content) return;
+      const row = content.parentElement;
+      cur = { row, content, x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0, dir: null, base: row.classList.contains('open') ? -W : 0 };
+    },
+    { passive: true },
+  );
+  root.addEventListener(
+    'touchmove',
+    (e) => {
+      if (!cur) return;
+      const dx = e.touches[0].clientX - cur.x;
+      const dy = e.touches[0].clientY - cur.y;
+      if (!cur.dir) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        cur.dir = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+        if (cur.dir === 'h') {
+          cur.content.style.transition = 'none';
+          cur.row.classList.add('swiping');
+        }
+      }
+      if (cur.dir !== 'h') return;
+      e.preventDefault();
+      cur.dx = Math.min(0, cur.base + dx);
+      cur.content.style.transform = `translateX(${cur.dx}px)`;
+      cur.row.classList.toggle('full', cur.dx < -cur.row.offsetWidth * 0.5);
+    },
+    { passive: false },
+  );
+  root.addEventListener('touchend', () => {
+    if (!cur) return;
+    const c = cur;
+    cur = null;
+    if (c.dir !== 'h') return;
+    c.content.style.transition = '';
+    c.row.dataset.swiped = '1';
+    setTimeout(() => delete c.row.dataset.swiped, 80);
+    if (c.dx < -c.row.offsetWidth * 0.5) {
+      c.content.style.transform = 'translateX(-100%)';
+      setTimeout(() => c.row.querySelector('.swipe-action').click(), 180);
+    } else if (c.dx < -W / 2) {
+      c.content.style.transform = `translateX(${-W}px)`;
+      c.row.classList.add('open');
+      if (openRow && openRow !== c.row) closeRow(openRow);
+      openRow = c.row;
+    } else closeRow(c.row);
+  });
+  // a swipe must not count as a tap on the row
+  root.addEventListener(
+    'click',
+    (e) => {
+      const r = e.target.closest('.swipe-row');
+      if (r?.dataset.swiped && !e.target.closest('.swipe-action')) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    },
+    true,
+  );
+}
+
+// ---------- passcode ----------
+
+async function sha256(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Six-digit keypad. Calls onSuccess when the code's hash matches.
+export function passcodeSheet(title, hash, onSuccess) {
+  let code = '';
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'];
+  const ctx = openSheet((ctx) => {
+    ctx.body.innerHTML = `${sheetHeader('')}
+      <div class="sheet-body passcode">
+        <div class="pc-lock">🔒</div>
+        <h3>${esc(title)}</h3>
+        <div class="pc-dots">${[0, 1, 2, 3, 4, 5].map((i) => `<span class="${i < code.length ? 'on' : ''}"></span>`).join('')}</div>
+        <div class="pc-pad">${keys.map((k) => (k ? `<button data-k="${k}" aria-label="${k === '⌫' ? 'Delete' : k}">${k}</button>` : '<span></span>')).join('')}</div>
+      </div>`;
+  });
+  const paint = () => ctx.body.querySelectorAll('.pc-dots span').forEach((s, i) => s.classList.toggle('on', i < code.length));
+  ctx.body.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-k]');
+    if (!b || code.length >= 6) return;
+    const k = b.dataset.k;
+    code = k === '⌫' ? code.slice(0, -1) : code + k;
+    paint();
+    if (code.length < 6) return;
+    if ((await sha256(code)) === hash) {
+      ctx.close();
+      onSuccess();
+    } else {
+      const dots = ctx.body.querySelector('.pc-dots');
+      dots.classList.add('shake');
+      setTimeout(() => {
+        dots.classList.remove('shake');
+        code = '';
+        paint();
+      }, 450);
+    }
+  });
 }

@@ -1,5 +1,5 @@
 // App state: shared data (synced) + device settings (this phone only).
-import { buildSeed } from './seed.js';
+import { buildSeed, upgradeSeed } from './seed.js';
 import { mergeState } from './merge.js';
 import { DAY, itemStatus } from './predict.js';
 
@@ -24,7 +24,7 @@ function safeSet(key, val) {
 }
 
 export const store = {
-  data: safeGet(DATA_KEY) || buildSeed(),
+  data: upgradeSeed(safeGet(DATA_KEY) || buildSeed()),
   device: {
     name: '',
     lookahead: 2,

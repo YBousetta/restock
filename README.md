@@ -15,7 +15,12 @@ No App Store, no install: it's a web app you add to your home screen.
 - **Adding**: tap "Add an item" for one-tap chips (running low, staples), search your items, or create a new one.
   New items get a guessed icon, category and rhythm from their name (`js/knowledge.js`).
 - **Item details**: stock meter, add/bought/still-have actions, rhythm settings, learned insight, purchase history.
+- **Meals** grouped by type (Breakfast, Lunch, Dinner, Dessert, Soups, Salads, Drinks) with 3 ideas each.
+  Creating a meal takes 3 steps: name + type, ingredients (food only; new ones are added to your items),
+  then pick what to add to the shopping list.
+- **Swipe left** to delete items and meals, or to remove something from the shopping list. Undo is in the toast.
 - **Settings**: name, list style, look-ahead, aisle order (drag to reorder), partner sync, backup.
+  Backup & restore asks for a passcode. It only keeps casual taps out: the app's code is public.
 
 ### Learning
 Each "Learn" item starts from its guessed interval. Every time you buy it, the gap since the last

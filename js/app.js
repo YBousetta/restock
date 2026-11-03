@@ -2,11 +2,13 @@ import * as S from './store.js';
 import { store } from './store.js';
 import { icons } from './icons.js';
 import { DAY, formatDays, formatInterval } from './predict.js';
-import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, guessItemIcon, guessCategory } from './knowledge.js';
-import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction } from './ui.js';
+import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_IDEAS, NON_FOOD, guessItemIcon, guessCategory } from './knowledge.js';
+import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
+// SHA-256 of the backup passcode. This only keeps casual taps out: the app's code is public.
+const BACKUP_HASH = 'bfbe56885d33f05b961223170f34a0af243bd62f2d0d9d3dfdf4e3fa4058c968';
 
 const ui = {
   tab: localGet('restock.tab') || 'list',
@@ -16,6 +18,7 @@ const ui = {
   addQuery: '',
   addedNow: new Set(), // items added during the current add session (stay visible as "added")
   scroll: {},
+  backupUnlocked: false,
 };
 
 function localGet(k) {
@@ -55,6 +58,10 @@ function groupByCategory(entries) {
 
 function sectionHeader(cat, extra = '') {
   return `<div class="section-header"><span class="cat-head"><span class="cat-icon">${catIcon(cat)}</span>${esc(catName(cat))}</span>${extra}</div>`;
+}
+
+function swipeRow(inner, act, id, label, cls = '') {
+  return `<div class="swipe-row ${cls}"><button class="swipe-action ${act === 'removeitem' ? 'orange' : ''}" data-act="${act}" data-id="${id}">${label}</button>${inner}</div>`;
 }
 
 function freqShort(st, item) {
@@ -198,7 +205,7 @@ function buyTile(item, st) {
 }
 
 function buyRow(item, st, compact) {
-  return `<div class="row has-check ${compact ? 'compact' : ''}">
+  const row = `<div class="row has-check swipe-content ${compact ? 'compact' : ''}">
     <button class="check-hit" data-act="buy" data-id="${item.id}" aria-label="Bought ${esc(item.name)}"><span class="check">${icons.check}</span></button>
     ${compact ? '' : `<span class="item-icon">${itemIcon(item)}</span>`}
     <button class="body" data-act="detail" data-id="${item.id}">
@@ -206,6 +213,7 @@ function buyRow(item, st, compact) {
       ${compact ? '' : `<div class="sub">${freqShort(st, item)}${st.kind === 'due' ? ' · ' + dueLabel(st) : ''}</div>`}
     </button>
     ${compact ? `<span class="detail small">${freqShort(st, item)}</span>` : ''}</div>`;
+  return swipeRow(row, 'removeitem', item.id, 'Remove');
 }
 
 function a2hsCard() {
@@ -301,7 +309,7 @@ function itemsResults() {
     for (const { item, st } of list.sort(byName)) {
       const on = onListKind(st.kind);
       const lvl = stockLevel(st);
-      html += `<div class="row">
+      html += swipeRow(`<div class="row swipe-content">
         <span class="item-icon">${itemIcon(item)}</span>
         <button class="body" data-act="detail" data-id="${item.id}">
           <div class="title">${esc(item.name)}</div>
@@ -309,11 +317,11 @@ function itemsResults() {
           ${lvl != null && !on ? `<div class="mini-meter"><div style="width:${Math.round(lvl * 100)}%;background:${meterColor(lvl)}"></div></div>` : ''}
         </button>
         <button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>
-      </div>`;
+      </div>`, 'delitem', item.id, 'Delete');
     }
     html += `</div>`;
   }
-  return html + `<p class="section-footer center">${entries.length} items</p>`;
+  return html + `<p class="section-footer center">${entries.length} items · swipe left to delete</p>`;
 }
 
 function itemsView() {
@@ -334,23 +342,46 @@ function itemsView() {
 // ---------- meals ----------
 
 function mealsView() {
-  const meals = S.live(store.data.meals).sort((a, b) => a.name.localeCompare(b.name));
-  let html = `<h1 class="large-title">Meals</h1><p class="subtitle">Planning a meal? Add what's missing in one tap.</p>`;
-  if (!meals.length) return html + `<div class="empty"><div class="big">🍽️</div><h3>No meals yet</h3><p>Tap + to add your usual meals.</p></div>`;
-  html += `<div class="meal-list">`;
-  for (const m of meals) {
-    const ings = m.items.map((id) => store.data.items[id]).filter((i) => i && !i.deleted);
-    const missing = ings.filter((i) => ['needed', 'due', 'soon'].includes(S.status(i).kind)).length;
-    html += `<button class="meal-card" data-act="meal" data-id="${m.id}">
-      <div class="meal-icons">${ings
-        .slice(0, 6)
-        .map((i) => `<span>${itemIcon(i)}</span>`)
-        .join('')}</div>
-      <div class="meal-name">${esc(m.name)}</div>
-      <div class="meal-sub">${ings.length} ingredients${missing ? ` · <span class="soon">${missing} running low</span>` : ''}</div>
-    </button>`;
+  const meals = S.live(store.data.meals);
+  const names = new Set(meals.map((m) => m.name.toLowerCase()));
+  let html = `<h1 class="large-title">Meals</h1><p class="subtitle">Tap a meal to shop for it. Swipe left to delete.</p>`;
+  const cats = [...MEAL_CATEGORIES, ['other', 'Other', '🍽️']];
+  for (const [k, label, icon] of cats) {
+    const mine = meals.filter((m) => mealCatOf(m) === k).sort((a, b) => a.name.localeCompare(b.name));
+    const ideas = (MEAL_IDEAS[k] || []).map((x, i) => [...x, i]).filter(([n]) => !names.has(n.toLowerCase()));
+    if (!mine.length && !ideas.length) continue;
+    html += `<div class="section-header"><span class="cat-head"><span class="cat-icon">${icon}</span>${label}</span>
+      ${k !== 'other' ? `<button data-act="newmeal" data-cat="${k}">Add</button>` : ''}</div>`;
+    if (mine.length) html += `<div class="meal-list">${mine.map(mealCard).join('')}</div>`;
+    if (ideas.length) {
+      html += `<div class="ideas">${ideas
+        .map(
+          ([n, ings, i]) => `<button class="idea-card" data-act="mealidea" data-cat="${k}" data-i="${i}">
+          <span class="idea-tag">Idea</span>
+          <div class="idea-icons">${ings.slice(0, 4).map((x) => `<span>${guessItemIcon(x) || '🍽️'}</span>`).join('')}</div>
+          <b>${esc(n)}</b><span class="idea-add">${icons.plus}</span></button>`,
+        )
+        .join('')}</div>`;
+    }
   }
-  return html + `</div>`;
+  return html;
+}
+
+const mealCatOf = (m) => (MEAL_CATEGORIES.some(([k]) => k === m.category) ? m.category : 'other');
+const mealIcon = (cat) => MEAL_CATEGORIES.find(([k]) => k === cat)?.[2] || '🍽️';
+
+function mealCard(m) {
+  const ings = (m.items || []).map((id) => store.data.items[id]).filter((i) => i && !i.deleted);
+  const low = ings.filter((i) => ['needed', 'due', 'soon'].includes(S.status(i).kind)).length;
+  const card = `<button class="meal-card swipe-content" data-act="meal" data-id="${m.id}">
+    <div class="meal-icons">${ings
+      .slice(0, 6)
+      .map((i) => `<span>${itemIcon(i)}</span>`)
+      .join('')}${ings.length > 6 ? `<em>+${ings.length - 6}</em>` : ''}</div>
+    <div class="meal-name">${esc(m.name)}</div>
+    <div class="meal-sub">${ings.length} ingredient${ings.length === 1 ? '' : 's'}${low ? ` · <span class="soon">${low} running low</span>` : ''}</div>
+  </button>`;
+  return swipeRow(card, 'delmeal', m.id, 'Delete', 'card');
 }
 
 // ---------- settings ----------
@@ -527,15 +558,11 @@ function iconPicker(current, withAuto) {
 }
 
 // Bring the selected category pill into view inside its horizontal scroller.
-function centerSelectedPill(root) {
-  const row = root.querySelector('.cat-scroll');
-  const on = row?.querySelector('.cat-pill.on');
-  if (on) row.scrollLeft = on.offsetLeft - row.clientWidth / 2 + on.clientWidth / 2;
-}
+function centerSelectedPill() {}
 
 function catPicker(current) {
-  return `<div class="cat-scroll" data-nodrag>${S.categories()
-    .map((c) => `<button class="cat-pill ${c.id === current ? 'on' : ''}" data-s="pickcat" data-c="${c.id}">${catIcon(c.id)} ${esc(c.name)}</button>`)
+  return `<div class="cat-grid">${S.categories()
+    .map((c) => `<button class="cat-tile ${c.id === current ? 'on' : ''}" data-s="pickcat" data-c="${c.id}"><span>${catIcon(c.id)}</span>${esc(c.name)}</button>`)
     .join('')}</div>`;
 }
 
@@ -684,7 +711,7 @@ const RHYTHM_OPTIONS = [
 ];
 
 function createSheet(presetName = '', { needed = true } = {}) {
-  const d = { name: presetName, cat: null, icon: null, rhythm: undefined, needed, pickIcon: false };
+  const d = { name: presetName, cat: null, icon: null, rhythm: undefined, needed, pickIcon: false, pickCat: false };
   const cat = () => d.cat || guessCategory(d.name, S.items()) || 'other';
   const rhythm = () => (d.rhythm !== undefined ? d.rhythm : (CATEGORY_RHYTHM[cat()] ?? null));
   const isPreset = (r) => RHYTHM_OPTIONS.some(([k]) => k === r);
@@ -725,7 +752,8 @@ function createSheet(presetName = '', { needed = true } = {}) {
           : ''
       }
       <div class="section-header"><span>Category</span>${!d.cat && name && guessCategory(name, S.items()) ? '<span class="auto-tag">✨ Guessed</span>' : ''}</div>
-      ${catPicker(c)}
+      <button class="cat-select" data-s="togglecat"><span class="cat-icon lg">${catIcon(c)}</span><b>${esc(catName(c))}</b><span class="cat-change">${d.pickCat ? 'Close' : 'Change'}</span></button>
+      ${d.pickCat ? catPicker(c) : ''}
       <div class="section-header"><span>How often do you buy it?</span>${d.rhythm === undefined && name ? '<span class="auto-tag">✨ Suggested</span>' : ''}</div>
       <div class="rhythm-grid">${RHYTHM_OPTIONS.map(
         ([k, l, sub]) =>
@@ -771,7 +799,11 @@ function createSheet(presetName = '', { needed = true } = {}) {
       d.icon = b.dataset.ic || null;
       d.pickIcon = false;
     }
-    if (s === 'pickcat') d.cat = b.dataset.c;
+    if (s === 'togglecat') d.pickCat = !d.pickCat;
+    if (s === 'pickcat') {
+      d.cat = b.dataset.c;
+      d.pickCat = false;
+    }
     if (s === 'rhythm') {
       const k = b.dataset.k;
       const r = rhythm();
@@ -1175,7 +1207,7 @@ function mealSheet(id) {
     const s = b.dataset.s;
     if (s === 'edit') {
       ctx.close();
-      return mealEditor(id);
+      return mealWizard({ id });
     }
     if (s === 'pick') {
       picked.has(b.dataset.id) ? picked.delete(b.dataset.id) : picked.add(b.dataset.id);
@@ -1189,66 +1221,260 @@ function mealSheet(id) {
   });
 }
 
-function mealEditor(id) {
-  const meal = id ? store.data.meals[id] : { name: '', items: [] };
-  const d = { name: meal.name, items: new Set(meal.items), q: '' };
+// Three steps: 1 name + type, 2 ingredients (food only, new ones allowed), 3 pick what to buy, then save.
+function mealWizard({ id = null, cat = null, name = '', ingredientNames = null, step = 1 } = {}) {
+  const meal = id ? store.data.meals[id] : null;
+  const d = {
+    step,
+    name: meal ? meal.name : name,
+    cat: meal ? meal.category || null : cat,
+    items: new Set(meal ? meal.items.filter((i) => store.data.items[i] && !store.data.items[i].deleted) : []),
+    fresh: [], // new ingredient names, created when the meal is saved
+    q: '',
+    shop: null, // what to add to the shopping list (item ids, or "new:<name>")
+  };
+  const useIdea = (names) => {
+    d.items.clear();
+    d.fresh = [];
+    for (const n of names) {
+      const ex = S.findItemByName(n);
+      if (ex) d.items.add(ex.id);
+      else if (!d.fresh.includes(n)) d.fresh.push(n);
+    }
+  };
+  if (ingredientNames) useIdea(ingredientNames);
+  if (!d.name.trim() || !d.cat) d.step = 1;
+
+  const STEPS = ['Meal', 'Ingredients', 'Shopping'];
+  const total = () => d.items.size + d.fresh.length;
+  const isFood = (i) => !NON_FOOD.has(i.cat);
+
   let ctx;
   ctx = openSheet(
     (c) => {
       ctx = c;
-      ctx.body.innerHTML = `${sheetHeader(id ? 'Edit meal' : 'New meal')}
-      <div class="sheet-body">
-        <div class="group"><label class="row"><input type="text" id="mealname" value="${esc(d.name)}" placeholder="Meal name, e.g. Tuna bowl" autocomplete="off"></label></div>
-        <div class="section-header" id="mealcount">Ingredients · ${d.items.size}</div>
-        <label class="search">${icons.search}<input id="mealq" type="text" placeholder="Search items" autocomplete="off" autocorrect="off"></label>
-        <div class="group" id="meallist" style="margin-top:8px"></div>
-        ${id ? `<button class="delete-btn" data-s="delete">Delete meal</button>` : ''}
-      </div>
-      <div class="sheet-footer"><button class="btn" data-s="save">Save meal</button></div>`;
-      paint();
+      build();
     },
     { large: true },
   );
-  function paint() {
-    const q = norm(d.q.trim());
-    const all = S.items()
-      .filter((i) => !q || norm(i.name).includes(q))
-      .sort((a, b) => d.items.has(b.id) - d.items.has(a.id) || a.name.localeCompare(b.name))
-      .slice(0, 60);
-    ctx.body.querySelector('#meallist').innerHTML = all
-      .map(
-        (i) => `<button class="row has-check ${d.items.has(i.id) ? 'checked keep' : ''}" data-s="toggle" data-id="${i.id}">
-        <span class="check">${icons.check}</span><span class="item-icon sm">${itemIcon(i)}</span><div class="body"><div class="title">${esc(i.name)}</div></div></button>`,
-      )
-      .join('');
-    ctx.body.querySelector('#mealcount').textContent = `Ingredients · ${d.items.size}`;
+
+  function header() {
+    const back = d.step > 1 ? `<button class="nav-btn back-btn" data-s="back">‹ Back</button>` : '';
+    return `${sheetHeader(id ? 'Edit meal' : 'New meal', back)}
+      <div class="steps-bar">${STEPS.map((t, i) => `<div class="${i + 1 <= d.step ? 'on' : ''} ${i + 1 === d.step ? 'cur' : ''}"><i></i><span>${t}</span></div>`).join('')}</div>`;
   }
-  ctx.body.addEventListener('input', (e) => {
-    if (e.target.id === 'mealname') d.name = e.target.value;
-    if (e.target.id === 'mealq') {
-      d.q = e.target.value;
-      paint();
+
+  function build() {
+    if (d.step === 1) {
+      const ideas = !id && d.cat ? MEAL_IDEAS[d.cat] || [] : [];
+      ctx.body.innerHTML = `${header()}
+        <div class="sheet-body">
+          <div class="wiz-hero">${d.cat ? mealIcon(d.cat) : '🍽️'}</div>
+          <input class="hero-name" id="wname" placeholder="Name your meal" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done">
+          <div class="section-header">What kind of meal?</div>
+          <div class="mealcat-grid">${MEAL_CATEGORIES.map(
+            ([k, l, ic]) => `<button class="mealcat ${d.cat === k ? 'on' : ''}" data-s="cat" data-c="${k}"><span>${ic}</span>${l}</button>`,
+          ).join('')}</div>
+          ${
+            ideas.length
+              ? `<div class="section-header">Or start from an idea</div>
+            <div class="chip-wrap">${ideas.map(([n], i) => `<button class="chip-item" data-s="idea" data-i="${i}"><span>✨</span>${esc(n)}</button>`).join('')}</div>`
+              : ''
+          }
+        </div>
+        <div class="sheet-footer"><button class="btn" data-s="next" id="wnext">Next: ingredients</button></div>`;
+      syncNext();
+      if (!d.name) setTimeout(() => ctx.body.querySelector('#wname')?.focus(), 350);
     }
+
+    if (d.step === 2) {
+      ctx.body.innerHTML = `${header()}
+        <div class="sheet-body">
+          <div class="wiz-title"><span>${mealIcon(d.cat)}</span>${esc(d.name)}</div>
+          <div class="section-header"><span id="wcount"></span></div>
+          <div class="ing-chips" id="ingchips"></div>
+          <label class="search" style="margin-top:12px">${icons.search}<input id="wq" type="text" placeholder="Search or add an ingredient" autocomplete="off" autocorrect="off" enterkeyhint="done"></label>
+          <div id="wresults"></div>
+        </div>
+        <div class="sheet-footer"><button class="btn" data-s="next" id="wnext">Next: shopping</button></div>`;
+      paintIngredients();
+    }
+
+    if (d.step === 3) {
+      if (!d.shop) {
+        d.shop = new Set(d.fresh.map((n) => 'new:' + n));
+        for (const iid of d.items) if (['due', 'soon'].includes(S.status(store.data.items[iid]).kind)) d.shop.add(iid);
+      }
+      const tiles = [
+        ...[...d.items].map((iid) => {
+          const it = store.data.items[iid];
+          const st = S.status(it);
+          const on = onListKind(st.kind);
+          const sel = on || d.shop.has(iid);
+          const sub = on ? 'on list' : st.daysLeft == null ? 'as needed' : st.daysLeft <= 0 ? 'due' : formatDays(st.daysLeft);
+          return `<button class="tile pick ${sel ? 'sel' : ''}" data-s="shop" data-k="${iid}" ${on ? 'disabled' : ''}>
+            <span class="tile-icon">${itemIcon(it)}</span><span class="tile-name">${esc(it.name)}</span><span class="tile-freq">${sub}</span><span class="tile-sel">${icons.check}</span></button>`;
+        }),
+        ...d.fresh.map((n) => {
+          const k = 'new:' + n;
+          return `<button class="tile pick ${d.shop.has(k) ? 'sel' : ''}" data-s="shop" data-k="${esc(k)}">
+            <span class="tile-icon">${guessItemIcon(n) || '🛒'}</span><span class="tile-name">${esc(n)}</span><span class="tile-freq new-tag">new item</span><span class="tile-sel">${icons.check}</span></button>`;
+        }),
+      ];
+      const n = [...d.shop].length;
+      ctx.body.innerHTML = `${header()}
+        <div class="sheet-body">
+          <div class="feature-hero compact"><div class="fh-icon">🛒</div><h3>Need anything for it?</h3>
+            <p>Tap what to add to your shopping list. Items running low and new ones are already selected.</p></div>
+          <div class="grid">${tiles.join('')}</div>
+        </div>
+        <div class="sheet-footer"><button class="btn" data-s="save">${n ? `Save & add ${n} to list` : 'Save meal'}</button></div>`;
+    }
+  }
+
+  function syncNext() {
+    const btn = ctx.body.querySelector('#wnext');
+    if (!btn) return;
+    if (d.step === 1) btn.disabled = !d.name.trim() || !d.cat;
+    if (d.step === 2) {
+      btn.disabled = total() === 0;
+      btn.textContent = total() ? `Next: shopping (${total()})` : 'Add at least one ingredient';
+    }
+  }
+
+  function paintIngredients() {
+    const body = ctx.body;
+    body.querySelector('#wcount').textContent = `Ingredients · ${total()}`;
+    const chips = [
+      ...[...d.items].map((iid) => {
+        const it = store.data.items[iid];
+        return `<button class="ing-chip" data-s="rm" data-k="${iid}"><span>${itemIcon(it)}</span>${esc(it.name)}<b>×</b></button>`;
+      }),
+      ...d.fresh.map((n) => `<button class="ing-chip new" data-s="rmfresh" data-n="${esc(n)}"><span>${guessItemIcon(n) || '🛒'}</span>${esc(n)}<i>new</i><b>×</b></button>`),
+    ];
+    body.querySelector('#ingchips').innerHTML = chips.length ? chips.join('') : `<p class="ing-empty">Nothing yet. Search below or tap a suggestion.</p>`;
+
+    const q = d.q.trim();
+    let html = '';
+    if (q) {
+      const results = searchItems(q, 20).filter(isFood).slice(0, 8);
+      html += `<div class="group suggestions">`;
+      for (const it of results) {
+        const on = d.items.has(it.id);
+        html += `<button class="row tappable" data-s="toggle" data-k="${it.id}" data-keepfocus>
+          <span class="item-icon">${itemIcon(it)}</span><div class="body"><div class="title">${esc(it.name)}</div><div class="sub">${catIcon(it.cat)} ${esc(catName(it.cat))}</div></div>
+          <span class="sug-add ${on ? 'on' : ''}">${on ? icons.checkCircle : icons.plusCircle}</span></button>`;
+      }
+      const exists = S.findItemByName(q);
+      if (!exists && !d.fresh.some((n) => n.toLowerCase() === q.toLowerCase())) {
+        const gc = guessCategory(q, S.items());
+        const fc = gc && !NON_FOOD.has(gc) ? gc : 'pantry';
+        html += `<button class="row tappable create-row" data-s="addfresh" data-keepfocus>
+          <span class="item-icon new">${icons.plus}</span><div class="body"><div class="title">Add “${esc(q)}”</div>
+          <div class="sub">New ingredient · also added to your items as ${catIcon(fc)} ${esc(catName(fc))}</div></div></button>`;
+      } else if (exists && !isFood(exists)) {
+        html += `<p class="section-footer">${esc(exists.name)} isn't food, so it can't be an ingredient.</p>`;
+      }
+      html += `</div>`;
+    } else {
+      const counts = S.purchaseCounts();
+      const popular = S.items()
+        .filter((i) => isFood(i) && i.mode !== 'none' && !d.items.has(i.id))
+        .sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0) || a.interval - b.interval || a.name.localeCompare(b.name))
+        .slice(0, 18);
+      html += `<div class="section-header">Popular ingredients</div>
+        <div class="chip-wrap">${popular.map((i) => `<button class="chip-item" data-s="toggle" data-k="${i.id}"><span>${itemIcon(i)}</span>${esc(i.name)}</button>`).join('')}</div>`;
+    }
+    body.querySelector('#wresults').innerHTML = html;
+    syncNext();
+  }
+
+  ctx.body.addEventListener('input', (e) => {
+    if (e.target.id === 'wname') {
+      d.name = e.target.value;
+      syncNext();
+    }
+    if (e.target.id === 'wq') {
+      d.q = e.target.value;
+      paintIngredients();
+    }
+  });
+  ctx.body.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.target.id === 'wname') e.target.blur();
+    if (e.target.id === 'wq') {
+      e.preventDefault();
+      const q = d.q.trim();
+      if (!q) return e.target.blur();
+      const top = searchItems(q, 20).find((i) => isFood(i) && !d.items.has(i.id));
+      if (top && top.name.toLowerCase().startsWith(q.toLowerCase())) d.items.add(top.id);
+      else if (!S.findItemByName(q) && !d.fresh.some((n) => n.toLowerCase() === q.toLowerCase())) d.fresh.push(q);
+      d.q = '';
+      e.target.value = '';
+      paintIngredients();
+    }
+  });
+  ctx.body.addEventListener('mousedown', (e) => {
+    if (e.target.closest('[data-keepfocus]')) e.preventDefault();
   });
   ctx.body.addEventListener('click', (e) => {
     const b = e.target.closest('[data-s]');
-    if (!b) return;
+    if (!b || b.disabled) return;
     const s = b.dataset.s;
-    if (s === 'toggle') {
-      d.items.has(b.dataset.id) ? d.items.delete(b.dataset.id) : d.items.add(b.dataset.id);
-      return paint();
+    if (s === 'back') {
+      d.step--;
+      return build();
+    }
+    if (s === 'cat') {
+      d.cat = b.dataset.c;
+      return build();
+    }
+    if (s === 'idea') {
+      const [n, ings] = MEAL_IDEAS[d.cat][+b.dataset.i];
+      d.name = n;
+      useIdea(ings);
+      d.step = 2;
+      return build();
+    }
+    if (s === 'next') {
+      d.step++;
+      if (d.step === 3) d.shop = null;
+      return build();
+    }
+    if (s === 'toggle') d.items.has(b.dataset.k) ? d.items.delete(b.dataset.k) : d.items.add(b.dataset.k);
+    if (s === 'rm') d.items.delete(b.dataset.k);
+    if (s === 'rmfresh') d.fresh = d.fresh.filter((n) => n !== b.dataset.n);
+    if (s === 'addfresh') {
+      d.fresh.push(d.q.trim());
+      d.q = '';
+      const inp = ctx.body.querySelector('#wq');
+      if (inp) inp.value = '';
+    }
+    if (['toggle', 'rm', 'rmfresh', 'addfresh'].includes(s)) return paintIngredients();
+    if (s === 'shop') {
+      d.shop.has(b.dataset.k) ? d.shop.delete(b.dataset.k) : d.shop.add(b.dataset.k);
+      return build();
     }
     if (s === 'save') {
-      if (!d.name.trim()) return ctx.body.querySelector('#mealname').focus();
-      S.saveMeal({ id, name: d.name.trim(), items: [...d.items] });
-      toast(`${d.name.trim()} saved`);
-      return ctx.close();
+      const ids = [...d.items];
+      for (const n of d.fresh) {
+        const existing = S.findItemByName(n);
+        if (existing) {
+          ids.push(existing.id);
+          if (d.shop.has('new:' + n)) S.setNeeded(existing.id, true);
+          continue;
+        }
+        const g = guessCategory(n, S.items());
+        const c = g && !NON_FOOD.has(g) ? g : 'pantry';
+        const r = CATEGORY_RHYTHM[c] ?? null;
+        ids.push(S.addItem({ name: n, cat: c, mode: r === null ? 'none' : 'auto', interval: r ?? 7, needed: d.shop.has('new:' + n) }));
+      }
+      for (const iid of d.items) if (d.shop.has(iid)) S.setNeeded(iid, true);
+      S.saveMeal({ id, name: d.name.trim(), category: d.cat, items: ids });
+      const n = d.shop.size;
+      toast(`${d.name.trim()} saved${n ? ` · ${n} added to your list` : ''}`, { icon: mealIcon(d.cat) });
+      ctx.close();
     }
-    if (s === 'delete')
-      confirmAction(`Delete ${meal.name}?`, 'Delete meal', () => {
-        S.deleteMeal(id);
-        ctx.close();
-      });
   });
 }
 
@@ -1305,7 +1531,27 @@ function onAction(e) {
     case 'meal':
       return mealSheet(id);
     case 'newmeal':
-      return mealEditor(null);
+      return mealWizard({ cat: b.dataset.cat && b.dataset.cat !== 'other' ? b.dataset.cat : null });
+    case 'mealidea': {
+      const [name, ings] = MEAL_IDEAS[b.dataset.cat][+b.dataset.i];
+      return mealWizard({ cat: b.dataset.cat, name, ingredientNames: ings, step: 2 });
+    }
+    case 'delitem': {
+      const item = store.data.items[id];
+      S.deleteItem(id);
+      return toast(`${item.name} deleted`, { icon: '🗑️', undo: () => S.updateItem(id, { deleted: false }) });
+    }
+    case 'removeitem': {
+      const st = S.status(store.data.items[id]);
+      if (st.kind === 'needed') S.setNeeded(id, false);
+      else S.snooze(id);
+      return toast(`${store.data.items[id].name} removed from list`, { icon: '−', undo: () => S.setNeeded(id, true) });
+    }
+    case 'delmeal': {
+      const meal = store.data.meals[id];
+      S.deleteMeal(id);
+      return toast(`${meal.name} deleted`, { icon: '🗑️', undo: () => S.saveMeal({ ...meal, deleted: false }) });
+    }
     case 'viewmenu':
       return viewMenu();
     case 'look':
@@ -1315,7 +1561,11 @@ function onAction(e) {
     case 'sync':
       return syncSheet();
     case 'data':
-      return dataSheet();
+      if (ui.backupUnlocked) return dataSheet();
+      return passcodeSheet('Enter passcode', BACKUP_HASH, () => {
+        ui.backupUnlocked = true;
+        dataSheet();
+      });
     case 'dismissa2hs':
       localSet('restock.a2hsDismissed', '1');
       return render();
@@ -1408,6 +1658,7 @@ app.addEventListener(
 
 // ---------- boot ----------
 
+enableSwipe(app);
 S.subscribe(scheduleRender);
 onSyncChange(scheduleRender);
 render();

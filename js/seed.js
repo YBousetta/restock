@@ -192,5 +192,68 @@ export function buildSeed() {
     const id = 'm_' + slug(name);
     meals[id] = { id, name, items: ingredients.map(itemId), updatedAt: ts };
   }
-  return { schema: 1, categories, items, purchases: {}, meals };
+  const data = { schema: 1, categories, items, purchases: {}, meals };
+  upgradeSeed(data);
+  return data;
+}
+
+// ---------- catalog update v2 ----------
+// Runs on every load. Deterministic (fixed ids and timestamps), so every phone
+// ends up with identical data and sync merges cleanly. Never touches anything
+// the user edited or bought.
+
+const V2_AT = 2; // newer than the original seed (1), older than any real edit
+
+const V2_REMOVE = [
+  'Snacks', 'USB cable', 'Screwdriver', 'Lock', 'Bed sheet', 'Socks', 'Kitchen stuff (Cousina)', 'Liggat dyal cousina',
+  'Dahmis', 'Pizza stuff', 'Hair product', 'Pills', 'Bucket', 'Super glue', 'Melange',
+];
+
+// [name, category, interval (null = as needed)]
+const V2_ADD = [
+  ['Bananas', 'produce', 5], ['Apples', 'produce', 7], ['Oranges', 'produce', 7], ['Lemons', 'produce', 10], ['Carrots', 'produce', 7],
+  ['Cucumbers', 'produce', 5], ['Bell peppers', 'produce', 7], ['Zucchini', 'produce', 7], ['Garlic', 'produce', 14], ['Parsley', 'produce', 5],
+  ['Msemen', 'bakery', null], ['Harcha', 'bakery', null], ['Pita bread', 'bakery', null],
+  ['Salmon', 'meat', null], ['Sardines', 'meat', null], ['Shrimp', 'meat', null], ['Merguez', 'meat', null],
+  ['Butter', 'dairy', 14], ['Raib', 'dairy', 5], ['Jben', 'dairy', 7], ['Laughing Cow cheese', 'dairy', 14], ['Mozzarella', 'dairy', null],
+  ['Tea', 'breakfast', 14], ['Honey', 'breakfast', 30], ['Jam', 'breakfast', 30], ['Dates', 'breakfast', null],
+  ['Olive oil', 'pantry', 30], ['Vegetable oil', 'pantry', 30], ['Sugar', 'pantry', 30], ['Lentils', 'pantry', 30],
+  ['Chickpeas', 'pantry', 30], ['Couscous', 'pantry', 14], ['Olives', 'pantry', 14],
+  ['Ketchup', 'sauces', 30], ['Mustard', 'sauces', null], ['Harissa', 'sauces', null],
+  ['Cumin', 'spices', 60], ['Black pepper', 'spices', 60], ['Turmeric', 'spices', 60], ['Ras el hanout', 'spices', null], ['Cinnamon', 'spices', null],
+  ['Chips', 'snacks', 7], ['Cookies', 'snacks', 14], ['Almonds', 'snacks', null], ['Ice cream', 'snacks', null],
+  ['Orange juice', 'drinks', 7], ['Sparkling water', 'drinks', 7], ['Hawai', 'drinks', null],
+  ['Trash bags', 'household', 14], ['Sponges', 'household', 30], ['Floor cleaner', 'household', 30], ['Aluminium foil', 'household', null],
+  ['Cling film', 'household', null], ['Batteries', 'household', null], ['Light bulbs', 'household', null],
+  ['Razors', 'personal', 30], ['Mouthwash', 'personal', 30], ['Body lotion', 'personal', 30], ['Sanitary pads', 'personal', 30], ['Cotton pads', 'personal', null],
+  ['Paracetamol', 'health', null], ['Vitamins', 'health', 30], ['Hand sanitizer', 'health', null],
+];
+
+const V2_MEAL_CATS = {
+  m_breakfast: 'breakfast',
+  'm_potatoes-minced-meat': 'dinner',
+  'm_chicken-pasta-mushroom-soy-sauce': 'dinner',
+  'm_tuna-bowl': 'lunch',
+  'm_tuna-sandwich': 'lunch',
+};
+
+export function upgradeSeed(data) {
+  const bought = new Set(Object.values(data.purchases || {}).map((p) => p.itemId));
+  for (const name of V2_REMOVE) {
+    const id = itemId(name);
+    const it = data.items[id];
+    if (it && !it.deleted && (it.updatedAt || 0) <= 1 && !it.needed && !bought.has(id)) {
+      data.items[id] = { ...it, deleted: true, updatedAt: V2_AT };
+    }
+  }
+  for (const [name, cat, interval] of V2_ADD) {
+    const id = itemId(name);
+    if (data.items[id]) continue;
+    data.items[id] = { id, name, cat, mode: interval == null ? 'none' : 'auto', interval: interval ?? 7, needed: false, baselineAt: SEED_AT, updatedAt: V2_AT };
+  }
+  for (const [id, category] of Object.entries(V2_MEAL_CATS)) {
+    const m = data.meals[id];
+    if (m && !m.category && (m.updatedAt || 0) <= 1) data.meals[id] = { ...m, category, updatedAt: V2_AT };
+  }
+  return data;
 }
