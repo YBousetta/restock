@@ -106,6 +106,10 @@ export function history(itemId) {
     .sort((a, b) => b.at - a.at);
 }
 
+export function boughtSince(t) {
+  return live(store.data.purchases).filter((p) => p.at >= t);
+}
+
 export function boughtToday() {
   const start = new Date();
   start.setHours(0, 0, 0, 0);

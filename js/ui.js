@@ -92,6 +92,12 @@ export function openSheet(build, { large = false } = {}) {
     },
   };
   backdrop.onclick = () => ctx.close();
+  sheet.addEventListener('input', (e) => {
+    if (e.target.classList?.contains('days-input')) e.target.value = e.target.value.replace(/\D/g, '').slice(0, 2);
+  });
+  sheet.addEventListener('keydown', (e) => {
+    if (e.target.classList?.contains('days-input') && e.key === 'Enter') e.target.blur();
+  });
   sheet.addEventListener('click', (e) => {
     if (e.target.closest('[data-close]')) ctx.close();
   });

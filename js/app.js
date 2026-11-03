@@ -6,7 +6,7 @@ import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_ID
 import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 // SHA-256 of the backup passcode. This only keeps casual taps out: the app's code is public.
 const BACKUP_HASH = 'bfbe56885d33f05b961223170f34a0af243bd62f2d0d9d3dfdf4e3fa4058c968';
 
@@ -57,8 +57,21 @@ function groupByCategory(entries) {
   return [...groups.entries()].filter(([, list]) => list.length);
 }
 
-function sectionHeader(cat, extra = '') {
-  return `<div class="section-header"><span class="cat-head"><span class="cat-icon">${catIcon(cat)}</span>${esc(catName(cat))}</span>${extra}</div>`;
+// ---------- collapsible category sections ----------
+const collapsed = (scope) => new Set((store.device.collapsed || {})[scope] || []);
+function setCollapsed(scope, ids) {
+  S.saveDevice({ collapsed: { ...(store.device.collapsed || {}), [scope]: [...ids] } });
+}
+function catSection(scope, cat, count, body, open = false) {
+  const closed = !open && collapsed(scope).has(cat);
+  return `<button class="section-header collapsible ${closed ? 'closed' : ''}" data-act="togglecat" data-scope="${scope}" data-c="${cat}">
+      <span class="cat-head"><span class="caret-icon">${icons.chevron}</span>${esc(catName(cat))}</span><span class="count">${count}</span></button>
+    ${closed ? '' : body}`;
+}
+function collapseBar(scope, cats, label) {
+  const c = collapsed(scope);
+  const allClosed = cats.length && cats.every((id) => c.has(id));
+  return `<div class="collapse-bar"><span>${label}</span><button data-act="collapseall" data-scope="${scope}" data-cats="${cats.join(',')}">${allClosed ? 'Expand all' : 'Collapse all'}</button></div>`;
 }
 
 function swipeRow(inner, act, id, label, cls = '') {
@@ -104,7 +117,8 @@ function computeList() {
   const coming = all.filter((e) => e.st.kind === 'soon').sort((a, b) => a.st.daysLeft - b.st.daysLeft || byName(a, b));
   const seen = new Set();
   const bought = [];
-  for (const p of S.boughtToday().sort((a, b) => b.at - a.at)) {
+  const since = Math.max(Date.now() - DAY, store.device.cartClearedAt || 0);
+  for (const p of S.boughtSince(since).sort((a, b) => b.at - a.at)) {
     const item = store.data.items[p.itemId];
     if (!item || item.deleted || seen.has(p.itemId)) continue;
     seen.add(p.itemId);
@@ -181,14 +195,14 @@ function addPanel() {
     const isAdded = added(item.id);
     html += `<button class="row tappable" data-act="quick" data-id="${item.id}" data-keepfocus>
       <span class="item-icon">${itemIcon(item)}</span>
-      <div class="body"><div class="title">${esc(item.name)}</div><div class="sub">${catIcon(item.cat)} ${esc(catName(item.cat))} · ${freqShort(st, item)}</div></div>
+      <div class="body"><div class="title">${esc(item.name)}</div><div class="sub">${esc(catName(item.cat))} · ${freqShort(st, item)}</div></div>
       <span class="sug-add ${isAdded ? 'on' : ''}">${isAdded ? icons.checkCircle : icons.plusCircle}</span></button>`;
   }
   if (!S.findItemByName(q)) {
     const gc = guessCategory(q, S.items()) || 'other';
     html += `<button class="row tappable create-row" data-act="createitem" data-keepfocus>
       <span class="item-icon new">${icons.plus}</span>
-      <div class="body"><div class="title">Create “${esc(q)}”</div><div class="sub">New item · ${catIcon(gc)} ${esc(catName(gc))}</div></div></button>`;
+      <div class="body"><div class="title">Create “${esc(q)}”</div><div class="sub">New item · ${esc(catName(gc))}</div></div></button>`;
   }
   return html + `</div>`;
 }
@@ -253,9 +267,10 @@ function listView() {
     const tiles = groupByCategory(toBuy).flatMap(([, list]) => list.sort(byName));
     html += `<div class="grid">${tiles.map((e) => buyTile(e.item, e.st)).join('')}</div>`;
   } else {
-    for (const [cat, list] of groupByCategory(toBuy)) {
-      html += sectionHeader(cat, `<span class="count">${list.length}</span>`);
-      html += `<div class="group">${list.sort(byName).map((e) => buyRow(e.item, e.st, compact)).join('')}</div>`;
+    const groups = groupByCategory(toBuy);
+    if (groups.length > 1) html += collapseBar('list', groups.map(([c]) => c), '');
+    for (const [cat, list] of groups) {
+      html += catSection('list', cat, list.length, `<div class="group">${list.sort(byName).map((e) => buyRow(e.item, e.st, compact)).join('')}</div>`);
     }
   }
 
@@ -274,7 +289,7 @@ function listView() {
   }
 
   if (bought.length) {
-    html += `<div class="section-header">In the cart today</div><div class="group">`;
+    html += `<div class="section-header"><span>In the cart</span><button data-act="clearcart">Clear</button></div><div class="group">`;
     for (const { item, p } of bought) {
       const time = new Date(p.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
       html += `<div class="row has-check checked compact">
@@ -300,13 +315,14 @@ function itemsResults() {
     return `<div class="empty"><h3>No items</h3><p>${q ? `Nothing matches “${esc(ui.query)}”.` : ''}</p>
       ${q ? `<button class="btn secondary" data-act="newitem" data-name="${esc(ui.query)}">Create “${esc(ui.query)}”</button>` : ''}</div>`;
   }
-  let html = '';
-  for (const [cat, list] of groupByCategory(entries)) {
-    html += sectionHeader(cat, `<span class="count">${list.length}</span>`) + `<div class="group">`;
+  const groups = groupByCategory(entries);
+  let html = q ? '' : collapseBar('items', groups.map(([c]) => c), `${entries.length} items`);
+  for (const [cat, list] of groups) {
+    let body = `<div class="group">`;
     for (const { item, st } of list.sort(byName)) {
       const on = onListKind(st.kind);
       const lvl = stockLevel(st);
-      html += swipeRow(`<div class="row swipe-content">
+      body += swipeRow(`<div class="row swipe-content">
         <span class="item-icon">${itemIcon(item)}</span>
         <button class="body" data-act="detail" data-id="${item.id}">
           <div class="title">${esc(item.name)}</div>
@@ -316,14 +332,14 @@ function itemsResults() {
         <button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>
       </div>`, 'delitem', item.id, 'Delete');
     }
-    html += `</div>`;
+    html += catSection('items', cat, list.length, body + `</div>`, !!q);
   }
-  return html + `<p class="section-footer center">${entries.length} items</p>`;
+  return html;
 }
 
 function itemsView() {
   return `<label class="search">${icons.search}<input id="itemsearch" type="text" placeholder="Search items" value="${esc(ui.query)}" autocomplete="off" autocorrect="off"></label>
-    <div class="segmented" style="margin:10px 0 0">
+    <div class="filter-tabs" style="margin-top:10px">
       ${[
         ['all', 'All'],
         ['regular', 'Regular'],
@@ -541,7 +557,7 @@ function rhythmBlock(r) {
   ${
     r !== null && !isPreset
       ? `<div class="group" style="margin-top:10px"><div class="row"><div class="body"><div class="title">Every</div></div>
-    <span class="detail big">${r} days</span>
+    <label class="days-field"><input id="customdays" class="days-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="${r}" aria-label="Days" enterkeyhint="done" autocomplete="off"><span>days</span></label>
     <div class="stepper"><button data-s="custom" data-d="-1" aria-label="Fewer days">−</button><button data-s="custom" data-d="1" aria-label="More days">+</button></div></div></div>`
       : ''
   }`;
@@ -558,7 +574,7 @@ function centerSelectedPill() {}
 
 function catPicker(current) {
   return `<div class="cat-grid">${S.categories()
-    .map((c) => `<button class="cat-tile ${c.id === current ? 'on' : ''}" data-s="pickcat" data-c="${c.id}"><span>${catIcon(c.id)}</span>${esc(c.name)}</button>`)
+    .map((c) => `<button class="cat-tile ${c.id === current ? 'on' : ''}" data-s="pickcat" data-c="${c.id}">${esc(c.name)}</button>`)
     .join('')}</div>`;
 }
 
@@ -604,7 +620,7 @@ function itemDetail(id) {
           <div class="hero">
             <button class="hero-icon" data-s="icon" aria-label="Change icon">${itemIcon(item)}<span class="hero-edit">${icons.pencil}</span></button>
             <input class="hero-name" id="dname" value="${esc(item.name)}" autocomplete="off" enterkeyhint="done" aria-label="Name">
-            <button class="cat-chip" data-s="cat"><span class="cat-icon">${catIcon(item.cat)}</span>${esc(catName(item.cat))} <span class="caret">▾</span></button>
+            <button class="cat-chip" data-s="cat">${esc(catName(item.cat))} <span class="caret">▾</span></button>
           </div>
           ${local.icon ? iconPicker(item.icon || null, true) : ''}
           ${local.cat ? catPicker(item.cat) : ''}
@@ -653,6 +669,11 @@ function itemDetail(id) {
     if (e.target.id === 'dname' && e.key === 'Enter') e.target.blur();
   });
   ctx.body.addEventListener('change', (e) => {
+    if (e.target.id === 'customdays') {
+      const v = parseInt(e.target.value, 10);
+      if (v >= 1 && v <= 99) S.updateItem(id, { interval: v });
+      return ctx.rerender();
+    }
     if (e.target.dataset.s === 'learn') {
       S.updateItem(id, { mode: e.target.checked ? 'auto' : 'fixed' });
       ctx.rerender();
@@ -697,7 +718,7 @@ function itemDetail(id) {
       else if (k === 'custom') S.updateItem(id, { mode, interval: cur !== null && !preset ? cur : 10 });
       else S.updateItem(id, { mode, interval: +k });
     }
-    if (s === 'custom') S.updateItem(id, { interval: Math.min(180, Math.max(1, Math.round(item.interval) + +b.dataset.d)) });
+    if (s === 'custom') S.updateItem(id, { interval: Math.min(99, Math.max(1, Math.round(item.interval) + +b.dataset.d)) });
     if (s === 'delete') {
       return confirmAction(`Delete ${item.name}? Its history goes too.`, 'Delete item', () => {
         S.deleteItem(id);
@@ -761,7 +782,7 @@ function createSheet(presetName = '', { needed = true } = {}) {
           : ''
       }
       <div class="section-header"><span>Category</span>${!d.cat && name && guessCategory(name, S.items()) ? '<span class="auto-tag">✨ Guessed</span>' : ''}</div>
-      <button class="cat-select" data-s="togglecat"><span class="cat-icon lg">${catIcon(c)}</span><b>${esc(catName(c))}</b><span class="cat-change">${d.pickCat ? 'Close' : 'Change'}</span></button>
+      <button class="cat-select" data-s="togglecat"><b>${esc(catName(c))}</b><span class="cat-change">${d.pickCat ? 'Close' : 'Change'}</span></button>
       ${d.pickCat ? catPicker(c) : ''}
       <div class="section-header"><span>How often</span>${d.rhythm === undefined && name ? '<span class="auto-tag">✨ Suggested</span>' : ''}</div>
       ${rhythmBlock(r)}
@@ -781,6 +802,11 @@ function createSheet(presetName = '', { needed = true } = {}) {
   });
   ctx.body.addEventListener('change', (e) => {
     if (e.target.dataset.s === 'needed') d.needed = e.target.checked;
+    if (e.target.id === 'customdays') {
+      const v = parseInt(e.target.value, 10);
+      if (v >= 1 && v <= 99) d.rhythm = v;
+      paint();
+    }
   });
   ctx.body.addEventListener('keydown', (e) => {
     if (e.target.id === 'cname' && e.key === 'Enter') {
@@ -807,7 +833,7 @@ function createSheet(presetName = '', { needed = true } = {}) {
       const r = rhythm();
       d.rhythm = k === 'null' ? null : k === 'custom' ? (r !== null && !isPreset(r) ? r : 10) : +k;
     }
-    if (s === 'custom') d.rhythm = Math.min(180, Math.max(1, rhythm() + +b.dataset.d));
+    if (s === 'custom') d.rhythm = Math.min(99, Math.max(1, rhythm() + +b.dataset.d));
     if (s === 'adddup') {
       const dup = S.findItemByName(d.name);
       S.setNeeded(dup.id, true);
@@ -837,7 +863,6 @@ function aislesSheet() {
           <div class="group aisle-list">${S.categories()
             .map(
               (c) => `<div class="row arow" data-id="${c.id}">
-              <span class="cat-icon lg">${catIcon(c.id)}</span>
               <button class="body" data-s="edit" data-id="${c.id}"><div class="title">${esc(c.name)}</div></button>
               <span class="drag-handle" data-nodrag aria-label="Drag to reorder">${icons.grip}</span></div>`,
             )
@@ -901,36 +926,23 @@ function aislesSheet() {
 
 function categorySheet(id, done) {
   const cat = id ? store.data.categories[id] : null;
-  const d = { name: cat?.name || '', icon: id ? catIcon(id) : '📦' };
   const ctx = openSheet((ctx) => {
     ctx.body.innerHTML = `${sheetHeader(id ? 'Category' : 'New category')}
       <div class="sheet-body">
-        <div class="cat-preview" id="catprev">${d.icon}</div>
-        <div class="group"><label class="row"><input type="text" id="catname" value="${esc(d.name)}" placeholder="Category name" autocomplete="off"></label></div>
-        <div class="section-header">Icon</div>
-        ${iconPicker(d.icon, false)}
+        <div class="group" style="margin-top:8px"><label class="row"><input type="text" id="catname" value="${esc(cat?.name || '')}" placeholder="Category name" autocomplete="off" enterkeyhint="done"></label></div>
       </div>
       <div class="sheet-footer"><button class="btn" data-s="save">${id ? 'Save' : 'Add category'}</button></div>`;
   });
-  ctx.body.addEventListener('input', (e) => {
-    if (e.target.id === 'catname') d.name = e.target.value;
-  });
+  setTimeout(() => ctx.body.querySelector('#catname')?.focus(), 350);
   ctx.body.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-s]');
+    const b = e.target.closest('[data-s="save"]');
     if (!b) return;
-    if (b.dataset.s === 'pickicon') {
-      d.icon = b.dataset.ic;
-      ctx.body.querySelector('#catprev').textContent = d.icon;
-      ctx.body.querySelectorAll('.icon-grid button').forEach((x) => x.classList.toggle('on', x === b));
-    }
-    if (b.dataset.s === 'save') {
-      const name = d.name.trim();
-      if (!name) return ctx.body.querySelector('#catname').focus();
-      if (id) S.updateCategory(id, { name, icon: d.icon });
-      else S.updateCategory(S.addCategory(name), { icon: d.icon });
-      ctx.close();
-      done?.();
-    }
+    const name = ctx.body.querySelector('#catname').value.trim();
+    if (!name) return ctx.body.querySelector('#catname').focus();
+    if (id) S.updateCategory(id, { name });
+    else S.addCategory(name);
+    ctx.close();
+    done?.();
   });
 }
 
@@ -1353,7 +1365,7 @@ function mealWizard({ id = null, cat = null, name = '', ingredientNames = null, 
       for (const it of results) {
         const on = d.items.has(it.id);
         html += `<button class="row tappable" data-s="toggle" data-k="${it.id}" data-keepfocus>
-          <span class="item-icon">${itemIcon(it)}</span><div class="body"><div class="title">${esc(it.name)}</div><div class="sub">${catIcon(it.cat)} ${esc(catName(it.cat))}</div></div>
+          <span class="item-icon">${itemIcon(it)}</span><div class="body"><div class="title">${esc(it.name)}</div><div class="sub">${esc(catName(it.cat))}</div></div>
           <span class="sug-add ${on ? 'on' : ''}">${on ? icons.checkCircle : icons.plusCircle}</span></button>`;
       }
       const exists = S.findItemByName(q);
@@ -1362,7 +1374,7 @@ function mealWizard({ id = null, cat = null, name = '', ingredientNames = null, 
         const fc = gc && !NON_FOOD.has(gc) ? gc : 'pantry';
         html += `<button class="row tappable create-row" data-s="addfresh" data-keepfocus>
           <span class="item-icon new">${icons.plus}</span><div class="body"><div class="title">Add “${esc(q)}”</div>
-          <div class="sub">New ingredient · also added to your items as ${catIcon(fc)} ${esc(catName(fc))}</div></div></button>`;
+          <div class="sub">New ingredient · also added to your items as ${esc(catName(fc))}</div></div></button>`;
       } else if (exists && !isFood(exists)) {
         html += `<p class="section-footer">${esc(exists.name)} isn't food, so it can't be an ingredient.</p>`;
       }
@@ -1525,6 +1537,19 @@ function onAction(e) {
       const c = b.dataset.cat || (ui.mealFilter !== 'all' ? ui.mealFilter : null);
       return mealWizard({ cat: c && c !== 'all' && c !== 'other' ? c : null });
     }
+    case 'togglecat': {
+      const set = collapsed(b.dataset.scope);
+      set.has(b.dataset.c) ? set.delete(b.dataset.c) : set.add(b.dataset.c);
+      return setCollapsed(b.dataset.scope, set);
+    }
+    case 'collapseall': {
+      const cats = b.dataset.cats.split(',').filter(Boolean);
+      const set = collapsed(b.dataset.scope);
+      const allClosed = cats.every((c) => set.has(c));
+      return setCollapsed(b.dataset.scope, allClosed ? [] : cats);
+    }
+    case 'clearcart':
+      return S.saveDevice({ cartClearedAt: Date.now() });
     case 'mealfilter':
       ui.mealFilter = b.dataset.f;
       return render();
