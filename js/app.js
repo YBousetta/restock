@@ -6,7 +6,7 @@ import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_ID
 import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 // SHA-256 of the backup passcode. This only keeps casual taps out: the app's code is public.
 const BACKUP_HASH = 'bfbe56885d33f05b961223170f34a0af243bd62f2d0d9d3dfdf4e3fa4058c968';
 
@@ -551,16 +551,11 @@ function toggleQuick(id) {
 function rhythmBlock(r) {
   const isPreset = RHYTHM_OPTIONS.some(([k]) => k === r);
   const sel = (k) => (k === 'custom' ? r !== null && !isPreset : k === r);
-  return `<div class="rhythm-grid">${RHYTHM_OPTIONS.map(
-    ([k, l]) => `<button class="rhythm-card ${sel(k) ? 'on' : ''}" data-s="rhythm" data-k="${k}"><b>${l}</b>${k === 'custom' && sel(k) ? `<span>every ${r} days</span>` : ''}</button>`,
-  ).join('')}</div>
-  ${
-    r !== null && !isPreset
-      ? `<div class="group" style="margin-top:10px"><div class="row"><div class="body"><div class="title">Every</div></div>
-    <label class="days-field"><input id="customdays" class="days-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="${r}" aria-label="Days" enterkeyhint="done" autocomplete="off"><span>days</span></label>
-    <div class="stepper"><button data-s="custom" data-d="-1" aria-label="Fewer days">−</button><button data-s="custom" data-d="1" aria-label="More days">+</button></div></div></div>`
-      : ''
-  }`;
+  return `<div class="rhythm-grid">${RHYTHM_OPTIONS.map(([k, l]) =>
+    k === 'custom' && sel(k)
+      ? `<div class="rhythm-card on custom"><b>${l}</b><label class="days-field"><input id="customdays" class="days-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" value="${r}" aria-label="Days" enterkeyhint="done" autocomplete="off">days</label></div>`
+      : `<button class="rhythm-card ${sel(k) ? 'on' : ''}" data-s="rhythm" data-k="${k}"><b>${l}</b></button>`,
+  ).join('')}</div>`;
 }
 
 function iconPicker(current, withAuto) {
@@ -617,10 +612,12 @@ function itemDetail(id) {
 
       ctx.body.innerHTML = `${sheetHeader('')}
         <div class="sheet-body">
-          <div class="hero">
+          <div class="hero-row detail">
             <button class="hero-icon" data-s="icon" aria-label="Change icon">${itemIcon(item)}<span class="hero-edit">${icons.pencil}</span></button>
-            <input class="hero-name" id="dname" value="${esc(item.name)}" autocomplete="off" enterkeyhint="done" aria-label="Name">
-            <button class="cat-chip" data-s="cat">${esc(catName(item.cat))} <span class="caret">▾</span></button>
+            <div class="hero-text">
+              <input class="hero-name" id="dname" value="${esc(item.name)}" autocomplete="off" enterkeyhint="done" aria-label="Name">
+              <button class="cat-chip" data-s="cat">${esc(catName(item.cat))} <span class="caret">▾</span></button>
+            </div>
           </div>
           ${local.icon ? iconPicker(item.icon || null, true) : ''}
           ${local.cat ? catPicker(item.cat) : ''}
@@ -753,9 +750,9 @@ function createSheet(presetName = '', { needed = true } = {}) {
       ctx = c;
       ctx.body.innerHTML = `${sheetHeader('New item')}
         <div class="sheet-body">
-          <div class="create-hero">
+          <div class="hero-row">
             <button class="hero-icon" data-s="icon" id="cicon" aria-label="Change icon"></button>
-            <input class="hero-name" id="cname" placeholder="Item name" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done">
+            <div class="hero-text"><input class="hero-name" id="cname" placeholder="Item name" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done"></div>
           </div>
           <div id="cdyn"></div>
         </div>
@@ -1273,8 +1270,10 @@ function mealWizard({ id = null, cat = null, name = '', ingredientNames = null, 
       const ideas = !id && d.cat ? MEAL_IDEAS[d.cat] || [] : [];
       ctx.body.innerHTML = `${header()}
         <div class="sheet-body">
-          <div class="wiz-hero">${d.cat ? mealIcon(d.cat) : '🍽️'}</div>
-          <input class="hero-name" id="wname" placeholder="Name your meal" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done">
+          <div class="hero-row">
+            <div class="hero-icon static">${d.cat ? mealIcon(d.cat) : '🍽️'}</div>
+            <div class="hero-text"><input class="hero-name" id="wname" placeholder="Name your meal" value="${esc(d.name)}" autocomplete="off" enterkeyhint="done"></div>
+          </div>
           <div class="section-header">What kind of meal?</div>
           <div class="mealcat-grid">${MEAL_CATEGORIES.map(
             ([k, l, ic]) => `<button class="mealcat ${d.cat === k ? 'on' : ''}" data-s="cat" data-c="${k}"><span>${ic}</span>${l}</button>`,

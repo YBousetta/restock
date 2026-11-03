@@ -513,3 +513,22 @@ body.simple .status-card .meter { height: 6px; }
 
 .cat-tile { min-height: 46px; font-size: 13px; padding: 8px 6px; }
 .cat-chip { gap: 4px; }
+
+/* ---------- v1.6: compact sheet headers + inline custom days ---------- */
+.hero-row { display: flex; align-items: center; gap: 14px; padding: 2px 0 14px; }
+.hero-row.detail { padding-right: 40px; }
+.hero-row .hero-icon { width: 60px; height: 60px; border-radius: 16px; font-size: 34px; flex: none; }
+.hero-row .hero-icon.static { display: grid; place-items: center; background: var(--bg-elev2); }
+.hero-row .hero-edit { width: 22px; height: 22px; right: -5px; bottom: -5px; border-width: 2px; }
+.hero-row .hero-edit svg { width: 11px; height: 11px; }
+.hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.hero-row .hero-name { text-align: left; font-size: 22px; padding: 4px 8px; margin-left: -8px; width: calc(100% + 8px); }
+.hero-row .cat-chip { padding: 4px 10px; font-size: 13px; }
+.sheet-head:has(h2:empty) + .sheet-body { padding-top: 6px; }
+.hero-row + .cat-grid, .picker + .cat-grid { margin-top: 0; margin-bottom: 14px; }
+body.simple .hero-row .hero-icon { display: none; }
+
+.rhythm-card.custom { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 8px 14px; }
+.rhythm-card.custom .days-field { font-size: 14px; color: var(--label2); gap: 4px; align-items: center; }
+.rhythm-card.custom .days-input { width: 40px; height: 32px; background: rgba(0, 0, 0, 0.25); }
+.days-input { color: var(--label); }
