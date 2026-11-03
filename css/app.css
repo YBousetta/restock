@@ -460,3 +460,38 @@ textarea.code { width: 100%; min-height: 88px; background: var(--bg-elev2); bord
 .pc-pad button { width: 76px; height: 76px; border-radius: 50%; background: var(--bg-elev3); font-size: 30px; font-weight: 400; transition: background 0.1s; }
 .pc-pad button:active { background: #636366; }
 .pc-pad button[data-k="⌫"] { background: none; font-size: 24px; }
+
+/* ---------- v1.4: inline titles, filter tabs, simple view ---------- */
+.navbar { padding: calc(var(--safe-top) + 6px) 8px 6px 16px; min-height: calc(var(--safe-top) + 54px); }
+.nav-title { margin: 0; font-size: 30px; font-weight: 700; letter-spacing: 0.3px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navbar .right { margin-left: auto; }
+.navbar .right:empty { display: none; }
+.view > :first-child { margin-top: 4px; }
+.subtitle { margin: 0 0 12px; }
+
+.filter-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 0 -16px; padding: 2px 16px 4px; scrollbar-width: none; }
+.filter-tabs::-webkit-scrollbar { display: none; }
+.filter-tabs button { flex: none; padding: 7px 14px; border-radius: 99px; background: var(--fill); font-size: 14px; font-weight: 500; color: var(--label2); transition: background 0.15s; }
+.filter-tabs button.on { background: var(--label); color: #000; font-weight: 600; }
+.plus-dot { width: 22px; height: 22px; border-radius: 50%; background: var(--tint-soft); color: var(--tint); display: grid; place-items: center; flex: none; }
+.plus-dot svg { width: 13px; height: 13px; stroke-width: 3; }
+.rhythm-card { min-height: 52px; justify-content: center; }
+
+/* Simple view: no emoji, no meters, plain rows. */
+body.simple .item-icon:not(.new), body.simple .cat-icon, body.simple .tile-icon, body.simple .chip-item > span,
+body.simple .ing-chip > span, body.simple .mini-meter, body.simple .sicon, body.simple .hero-icon, body.simple .fh-icon,
+body.simple .wiz-hero, body.simple .wiz-title > span, body.simple .mealcat > span, body.simple .cat-tile > span,
+body.simple .pc-lock, body.simple .cat-select .cat-icon, body.simple .meter-cap { display: none; }
+body.simple .row, body.simple .srow, body.simple .has-check { --inset: 14px; }
+body.simple .has-check { --inset: 50px; }
+body.simple .grid { gap: 8px; }
+body.simple .tile { aspect-ratio: auto; min-height: 76px; border-radius: 14px; padding: 10px 8px; }
+body.simple .tile-name { font-size: 15px; }
+body.simple .chip-item { padding: 9px 14px; }
+body.simple .cat-tile, body.simple .mealcat { min-height: 48px; font-size: 13px; }
+body.simple .hero, body.simple .create-hero { padding-top: 8px; }
+body.simple .status-card .meter { height: 6px; }
+
+/* Untitled sheet header (item details): float the close button, don't cover the hero. */
+.sheet-head:has(h2:empty) { background: transparent; position: absolute; top: 6px; right: 0; left: auto; min-height: 44px; }
+.sheet-head:has(h2:empty) + .sheet-body { padding-top: 26px; }
