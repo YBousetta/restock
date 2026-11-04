@@ -3,7 +3,7 @@ import { store } from './store.js';
 import { icons } from './icons.js';
 import { DAY, formatDays, formatInterval, formatAgo, formatUsually } from './predict.js';
 import {
-  SNOOZE_DAYS, STREAK_FOR_SUGGESTION, deckCandidates, newDeck, deckAnswer, deckUndo, deckSkip, deckDone, deckCurrent, deckSummary, suggestedCycle,
+  SNOOZE_DAYS, needsCycleSuggestion, deckCandidates, newDeck, deckAnswer, deckUndo, deckSkip, deckDone, deckCurrent, deckSummary, suggestedCycle,
 } from './deck.js';
 import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_IDEAS, NON_FOOD, guessItemIcon, guessCategory } from './knowledge.js';
 import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
@@ -381,7 +381,7 @@ function deckFinished(d) {
   // 3 "still have it" in a row on a regular item: offer a longer cycle (one at a time)
   const sug = have
     .map((id) => store.data.items[id])
-    .find((it) => it && !it.deleted && it.mode !== 'none' && (it.haveStreak || 0) >= STREAK_FOR_SUGGESTION);
+    .find(needsCycleSuggestion);
   let suggest = '';
   if (sug) {
     const cur = Math.max(1, Math.round(S.status(sug).cycleDays || sug.interval));

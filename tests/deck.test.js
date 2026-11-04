@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DAY, itemStatus } from '../js/predict.js';
 import {
   DECK_SIZE, LOOKAHEAD_DAYS, SNOOZE_DAYS, MIN_PURCHASES_AS_NEEDED,
-  deckCandidates, newDeck, deckAnswer, deckUndo, deckSkip, deckSummary, deckDone, deckCurrent, suggestedCycle,
+  deckCandidates, newDeck, deckAnswer, deckUndo, deckSkip, needsCycleSuggestion, deckSummary, deckDone, deckCurrent, suggestedCycle,
 } from '../js/deck.js';
 
 // The store reads and writes localStorage; give it an in-memory one under Node.
@@ -168,4 +168,27 @@ test('buying or adding by hand resets the still-have streak', () => {
   S.markBought(id);
   assert.equal(S.store.data.items[id].haveStreak, 0);
   assert.equal(S.store.data.items[id].snoozedUntil, null);
+});
+
+test('3 still-have answers in a row on a regular item suggest a longer cycle (3 days -> 5 days)', () => {
+  const id = S.addItem({ name: 'Milk test item', cat: 'dairy', mode: 'auto', interval: 3 });
+  S.deckHave(id, SNOOZE_DAYS);
+  S.deckHave(id, SNOOZE_DAYS);
+  assert.equal(needsCycleSuggestion(S.store.data.items[id]), false); // only 2 so far
+  S.deckHave(id, SNOOZE_DAYS);
+  assert.equal(needsCycleSuggestion(S.store.data.items[id]), true);
+  assert.equal(suggestedCycle(S.store.data.items[id].interval), 5);
+  S.resetHaveStreak(id); // Keep 3 days, or Change to 5 days
+  assert.equal(needsCycleSuggestion(S.store.data.items[id]), false);
+});
+
+test('a Need it answer in between breaks the streak; as-needed items never get the suggestion', () => {
+  const id = S.addItem({ name: 'Streak break item', cat: 'dairy', mode: 'auto', interval: 3 });
+  S.deckHave(id, SNOOZE_DAYS);
+  S.deckHave(id, SNOOZE_DAYS);
+  S.deckNeed(id);
+  S.deckHave(id, SNOOZE_DAYS);
+  assert.equal(needsCycleSuggestion(S.store.data.items[id]), false);
+  assert.equal(needsCycleSuggestion({ mode: 'none', haveStreak: 9 }), false);
+  assert.equal(needsCycleSuggestion({ mode: 'auto', haveStreak: 3, deleted: true }), false);
 });

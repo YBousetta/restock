@@ -59,3 +59,7 @@ export function deckSummary(d) {
 
 // A longer cycle to suggest: about 50 percent longer, rounded (3 days -> 5 days).
 export const suggestedCycle = (days) => Math.max(days + 1, Math.round(days * 1.5));
+
+// Offer a longer cycle once a regular item got "still have it" this many times in a row.
+export const needsCycleSuggestion = (item) =>
+  !!item && !item.deleted && item.mode !== 'none' && (item.haveStreak || 0) >= STREAK_FOR_SUGGESTION;
