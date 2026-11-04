@@ -975,8 +975,6 @@ function itemDetail(id) {
     if (s === 'rhythm') {
       const k = b.dataset.k;
       const mode = item.mode === 'none' ? 'auto' : item.mode;
-      const cur = item.mode === 'none' ? null : item.interval;
-      const preset = RHYTHM_OPTIONS.some(([x]) => x === cur);
       if (k === 'null') S.updateItem(id, { mode: 'none' });
       else if (k === 'custom') {
         local.customEdit = true;
@@ -1012,7 +1010,6 @@ function createSheet(presetName = '', { needed = true } = {}) {
   const d = { name: presetName, cat: null, icon: null, rhythm: undefined, needed, pickIcon: false, pickCat: false, customEdit: false };
   const cat = () => d.cat || guessCategory(d.name, S.items()) || 'other';
   const rhythm = () => (d.rhythm !== undefined ? d.rhythm : (CATEGORY_RHYTHM[cat()] ?? null));
-  const isPreset = (r) => RHYTHM_OPTIONS.some(([k]) => k === r);
 
   let ctx;
   ctx = openSheet(
@@ -1107,7 +1104,6 @@ function createSheet(presetName = '', { needed = true } = {}) {
     }
     if (s === 'rhythm') {
       const k = b.dataset.k;
-      const r = rhythm();
       if (k === 'custom') {
         d.customEdit = true;
         paint();

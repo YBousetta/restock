@@ -31,6 +31,7 @@ const CATEGORIES = [
 ];
 
 // [name, category, interval in days (null = as needed)]
+/** @type {[string, string, number | null][]} */
 const ITEMS = [
   // Every 2 to 3 days: fresh food for breakfast and daily meals
   ['Bread', 'bakery', 2],
@@ -157,6 +158,7 @@ const NEEDED_NOW = [
   'Fairy (dish soap)',
 ];
 
+/** @type {[string, string[]][]} */
 const MEALS = [
   ['Breakfast', ['Eggs', 'Cheese', 'Avocados', 'Tomatoes', 'Milk', 'Coffee', 'Bread']],
   ['Potatoes & minced meat', ['Potatoes', 'Ground beef', 'Onions', 'Kefta spices']],
@@ -210,6 +212,7 @@ const V2_REMOVE = [
 ];
 
 // [name, category, interval (null = as needed)]
+/** @type {[string, string, number | null][]} */
 const V2_ADD = [
   ['Bananas', 'produce', 5], ['Apples', 'produce', 7], ['Oranges', 'produce', 7], ['Lemons', 'produce', 10], ['Carrots', 'produce', 7],
   ['Cucumbers', 'produce', 5], ['Bell peppers', 'produce', 7], ['Zucchini', 'produce', 7], ['Garlic', 'produce', 14], ['Parsley', 'produce', 5],

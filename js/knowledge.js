@@ -43,6 +43,7 @@ export const ICON_CHOICES = [
 ];
 
 // [pattern, icon, category]. First match wins, so specific words come first.
+/** @type {[RegExp, string, string][]} */
 const RULES = [
   // fruits & vegetables
   [/rice water/, '🧴', 'personal'], [/olive oil|vegetable oil|sunflower oil|huile/, '🫒', 'pantry'], [/laughing cow|vache qui rit/, '🧀', 'dairy'], [/ice cream|glace vanille/, '🍦', 'snacks'], [/juice|\bjus\b|3asir/, '🧃', 'drinks'],

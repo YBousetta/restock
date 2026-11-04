@@ -11,6 +11,9 @@ No App Store, no install: it's a web app you add to your home screen.
 - **Coming up** shows what runs out in the next few days, so you can grab it now and skip a trip.
 - **Still have some** hides an item for a while without counting it as bought.
 - **Meals**: open a meal and add its missing ingredients in one tap.
+- **Forgot anything?** A swipe deck of items you may need (swipe right to add, left for "still have it", Undo, arrow keys).
+  Opens by itself when the list is empty, or from the row under the list, or from Review on the Items page.
+  Tuning constants are at the top of `js/deck.js`.
 - **Grid view** by default: tap a tile when it's in the cart, hold it for details. List and Compact views via the top-right button.
 - **Adding**: tap "Add an item" for one-tap chips (running low, staples), search your items, or create a new one.
   New items get a guessed icon, category and rhythm from their name (`js/knowledge.js`).
@@ -58,7 +61,7 @@ Plain HTML/CSS/JS modules, no build step.
 
 ```bash
 npm start   # http://localhost:8080
-npm test    # unit tests for learning and merge
+npm test    # unit tests: learning, merge, status, deck, meals
 ```
 
 Starting catalog and meals: `js/seed.js`. After changing app files, bump `CACHE` in `sw.js`.
