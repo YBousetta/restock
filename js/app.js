@@ -1,12 +1,15 @@
 import * as S from './store.js';
 import { store } from './store.js';
 import { icons } from './icons.js';
-import { DAY, formatDays, formatInterval } from './predict.js';
+import { DAY, formatDays, formatInterval, formatAgo, formatUsually } from './predict.js';
+import {
+  SNOOZE_DAYS, STREAK_FOR_SUGGESTION, deckCandidates, newDeck, deckAnswer, deckUndo, deckSkip, deckDone, deckCurrent, deckSummary, suggestedCycle,
+} from './deck.js';
 import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_IDEAS, NON_FOOD, guessItemIcon, guessCategory } from './knowledge.js';
 import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 // SHA-256 of the backup passcode. This only keeps casual taps out: the app's code is public.
 const BACKUP_HASH = 'bfbe56885d33f05b961223170f34a0af243bd62f2d0d9d3dfdf4e3fa4058c968';
 
@@ -20,6 +23,9 @@ const ui = {
   scroll: {},
   backupUnlocked: false,
   mealFilter: 'all',
+  deck: null, //        the open "Forgot anything?" session
+  autoDeckOff: false, // set by "View list" so an empty list does not reopen a deck at once
+  dragging: false,
 };
 
 function localGet(k) {
@@ -261,7 +267,12 @@ function listView() {
 
   if (ui.adding) return html + `<div id="addpanel">${addPanel()}</div>`;
 
-  if (!toBuy.length && !bought.length) {
+  // The "Forgot anything?" deck: opens by itself when the list is empty, and stays open until finished.
+  const cands = deckCandidates(computeList().all);
+  if (toBuy.length) ui.autoDeckOff = false;
+  if (!ui.deck && !toBuy.length && !ui.autoDeckOff && cands.deck.length) ui.deck = newDeck(cands.deck.map((e) => e.item.id));
+
+  if (!toBuy.length && !bought.length && !ui.deck) {
     const next = S.items()
       .map((item) => ({ item, st: S.status(item) }))
       .filter((e) => e.st.daysLeft != null)
@@ -280,6 +291,9 @@ function listView() {
       html += catSection('list', cat, list.length, `<div class="group">${list.sort(byName).map((e) => buyRow(e.item, e.st, compact)).join('')}</div>`);
     }
   }
+
+  if (ui.deck) html += deckBlock();
+  else if (cands.deck.length) html += forgotRow(cands.deck.length);
 
   if (coming.length) {
     html += `<div class="section-header"><span>Coming up · ${store.device.lookahead} day${store.device.lookahead > 1 ? 's' : ''}</span>
@@ -307,6 +321,171 @@ function listView() {
     html += `</div>`;
   }
   return html;
+}
+
+// ---------- "Forgot anything?" deck ----------
+
+function forgotRow(n) {
+  return `<button class="forgot-row" data-act="deckopen">
+    <span class="forgot-icon">${icons.bag}</span>
+    <span class="forgot-text"><b>Forgot anything?</b><span>Check ${n} item${n === 1 ? '' : 's'} you might need</span></span>
+    <span class="chev">${icons.chevron}</span></button>`;
+}
+
+function deckBlock() {
+  let d = ui.deck;
+  while (!deckDone(d) && (!store.data.items[deckCurrent(d)] || store.data.items[deckCurrent(d)].deleted)) d = ui.deck = deckSkip(d); // deleted meanwhile
+  return deckDone(d) ? deckFinished(d) : deckCard(d);
+}
+
+function deckCard(d) {
+  const item = store.data.items[deckCurrent(d)];
+  const st = S.status(item);
+  const left = d.ids.length - d.idx;
+  const last = st.daysSinceBought == null ? 'Not bought yet' : `Last bought ${formatAgo(st.daysSinceBought)}`;
+  const usually = item.mode === 'none' || st.cycleDays == null ? '' : `Usually ${formatUsually(Math.round(st.cycleDays))}`;
+  return `<section class="deck" aria-label="Forgot anything?">
+    <div class="deck-head"><h2>Forgot anything?</h2><div class="deck-meta">
+      ${d.log.length ? `<button class="deck-undo" data-act="deckundo">Undo</button>` : ''}
+      <span aria-live="polite">${d.idx + 1} of ${d.ids.length}</span></div></div>
+    <div class="deck-stage" tabindex="0" aria-label="${esc(item.name)}. Swipe right if you need it, left if you still have it. Arrow keys also work.">
+      ${left > 2 ? '<div class="deck-back b2"></div>' : ''}${left > 1 ? '<div class="deck-back b1"></div>' : ''}
+      <div class="deck-card" data-deckcard>
+        <span class="stamp need" aria-hidden="true">NEED IT</span><span class="stamp have" aria-hidden="true">HAVE IT</span>
+        <div class="deck-icon">${itemIcon(item)}</div>
+        <div class="deck-name">${esc(item.name)}</div>
+        <div class="deck-last">${last}</div>
+        ${usually ? `<div class="deck-usually">${usually}</div>` : ''}
+      </div>
+    </div>
+    <div class="deck-actions">
+      <button class="deck-btn have" data-act="deckhave">${icons.arrowLeft}Still have it</button>
+      <button class="deck-btn need" data-act="deckneed">Need it${icons.arrowRight}</button>
+    </div></section>`;
+}
+
+function deckFinished(d) {
+  const { added, have } = deckSummary(d);
+  const names = added.map((id) => store.data.items[id]?.name).filter(Boolean);
+  const title = added.length ? `${added.length} added to your list` : 'Nothing added to your list';
+  // 3 "still have it" in a row on a regular item: offer a longer cycle (one at a time)
+  const sug = have
+    .map((id) => store.data.items[id])
+    .find((it) => it && !it.deleted && it.mode !== 'none' && (it.haveStreak || 0) >= STREAK_FOR_SUGGESTION);
+  let suggest = '';
+  if (sug) {
+    const cur = Math.max(1, Math.round(S.status(sug).cycleDays || sug.interval));
+    suggest = `<section class="card deck-suggest"><div><b>${esc(sug.name)} lasts longer than ${cur} day${cur === 1 ? '' : 's'}</b>
+      <span>You still had it ${sug.haveStreak} times in a row.</span></div>
+      <div class="deck-suggest-btns"><button class="btn-outline" data-act="cyclechange" data-id="${sug.id}" data-n="${suggestedCycle(cur)}">Change to ${suggestedCycle(cur)} days</button>
+      <button class="btn-plain" data-act="cyclekeep" data-id="${sug.id}">Keep ${cur} day${cur === 1 ? '' : 's'}</button></div></section>`;
+  }
+  return `<section class="deck-done" aria-live="polite">
+      <div class="done-check">${icons.check}</div>
+      <h2>${title}</h2>
+      <p>${have.length} marked as still have</p>
+      ${names.length ? `<div class="done-chips">${names.map((n) => `<span>${esc(n)}</span>`).join('')}</div>` : ''}
+      <button class="btn" data-act="deckview">View list</button>
+      ${d.log.length ? `<button class="deck-undo center" data-act="deckundo">Undo last answer</button>` : ''}
+    </section>${suggest}`;
+}
+
+// Answer the current card. `type` is 'need' (swipe right) or 'have' (swipe left).
+function answerDeck(type) {
+  const d = ui.deck;
+  if (!d || deckDone(d)) return;
+  const id = deckCurrent(d);
+  const item = store.data.items[id];
+  if (!item || item.deleted) return render();
+  const undo = type === 'need' ? S.deckNeed(id) : S.deckHave(id, SNOOZE_DAYS);
+  ui.deck = deckAnswer(d, type, undo);
+  render();
+}
+
+function undoDeck() {
+  if (!ui.deck) return;
+  const { deck, entry } = deckUndo(ui.deck);
+  if (!entry) return;
+  S.undoDeckAnswer(entry.id, entry.undo);
+  ui.deck = deck;
+  render();
+}
+
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+let flying = false;
+
+// Fly the card off to one side, then record the answer.
+function flyCard(type) {
+  const card = $('[data-deckcard]');
+  if (!card || flying) return;
+  if (reducedMotion()) return answerDeck(type);
+  flying = true;
+  const dir = type === 'need' ? 1 : -1;
+  card.style.transition = 'transform 0.24s ease-in, opacity 0.24s';
+  card.style.transform = `translateX(${dir * (card.offsetWidth + 80)}px) rotate(${dir * 16}deg)`;
+  card.style.opacity = '0';
+  card.querySelector(dir > 0 ? '.stamp.need' : '.stamp.have').style.opacity = '1';
+  setTimeout(() => {
+    flying = false;
+    answerDeck(type);
+  }, 240);
+}
+
+function setupDeckGestures() {
+  const THRESHOLD = 90;
+  let drag = null;
+  app.addEventListener('pointerdown', (e) => {
+    const card = e.target.closest('[data-deckcard]');
+    if (!card || flying || e.button > 0) return;
+    drag = { card, x: e.clientX, dx: 0, t: Date.now() };
+    ui.dragging = true;
+    card.style.transition = 'none';
+    card.setPointerCapture(e.pointerId);
+  });
+  app.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    drag.dx = e.clientX - drag.x;
+    const tilt = Math.max(-12, Math.min(12, drag.dx / 14));
+    drag.card.style.transform = `translateX(${drag.dx}px) rotate(${tilt}deg)`;
+    const need = drag.card.querySelector('.stamp.need');
+    const have = drag.card.querySelector('.stamp.have');
+    need.style.opacity = String(Math.max(0, Math.min(1, drag.dx / THRESHOLD)));
+    have.style.opacity = String(Math.max(0, Math.min(1, -drag.dx / THRESHOLD)));
+    drag.card.classList.toggle('lean-need', drag.dx > 8);
+    drag.card.classList.toggle('lean-have', drag.dx < -8);
+  });
+  const end = (e) => {
+    if (!drag) return;
+    const { card, dx, t } = drag;
+    drag = null;
+    ui.dragging = false;
+    const fast = Math.abs(dx) / Math.max(1, Date.now() - t) > 0.6 && Math.abs(dx) > 40;
+    if (e.type !== 'pointercancel' && (Math.abs(dx) > THRESHOLD || fast)) {
+      card.style.transition = '';
+      return flyCard(dx > 0 ? 'need' : 'have');
+    }
+    card.style.transition = 'transform 0.2s var(--spring)';
+    card.style.transform = '';
+    card.classList.remove('lean-need', 'lean-have');
+    card.querySelectorAll('.stamp').forEach((s) => (s.style.opacity = ''));
+    if (renderPending) {
+      renderPending = false;
+      scheduleRender();
+    }
+  };
+  app.addEventListener('pointerup', end);
+  app.addEventListener('pointercancel', end);
+  document.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || !ui.deck || deckDone(ui.deck) || ui.tab !== 'list') return;
+    if (document.body.classList.contains('sheet-open') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      flyCard('need');
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      flyCard('have');
+    }
+  });
 }
 
 // ---------- items ----------
@@ -520,7 +699,12 @@ function render() {
 }
 
 let raf = 0;
+let renderPending = false;
 const scheduleRender = () => {
+  if (ui.dragging) {
+    renderPending = true; // never rebuild the page under a finger
+    return;
+  }
   cancelAnimationFrame(raf);
   raf = requestAnimationFrame(render);
 };
@@ -1620,6 +1804,33 @@ function onAction(e) {
       const allClosed = cats.every((c) => set.has(c));
       return setCollapsed(b.dataset.scope, allClosed ? [] : cats);
     }
+    case 'deckopen': {
+      const c = deckCandidates(computeList().all).deck;
+      if (!c.length) return;
+      ui.deck = newDeck(c.map((e) => e.item.id));
+      render();
+      return $('.deck')?.scrollIntoView({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    }
+    case 'deckneed':
+      return flyCard('need');
+    case 'deckhave':
+      return flyCard('have');
+    case 'deckundo':
+      return undoDeck();
+    case 'deckview':
+      ui.deck = null;
+      ui.autoDeckOff = true;
+      render();
+      return window.scrollTo(0, 0);
+    case 'cyclechange': {
+      const it = store.data.items[id];
+      // A learned item would drift back toward its history, so pin the number you chose.
+      S.updateItem(id, { interval: +b.dataset.n, ...(S.status(it).samples ? { mode: 'fixed' } : {}) });
+      S.resetHaveStreak(id);
+      return toast(`${it.name}: every ${b.dataset.n} days`);
+    }
+    case 'cyclekeep':
+      return S.resetHaveStreak(id);
     case 'clearcart':
       return S.saveDevice({ cartClearedAt: Date.now() });
     case 'mealfilter':
@@ -1755,6 +1966,7 @@ app.addEventListener(
 // ---------- boot ----------
 
 enableSwipe(app);
+setupDeckGestures();
 S.subscribe(scheduleRender);
 onSyncChange(scheduleRender);
 render();

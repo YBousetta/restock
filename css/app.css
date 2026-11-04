@@ -558,3 +558,64 @@ body.simple .hero-row .hero-icon { display: none; }
 .timeline .row { --inset: 34px; }
 body.simple .row:has(> .item-icon), body.simple .srow { --inset: 14px; }
 body.simple .row.has-check, body.simple .row.has-check:has(> .item-icon) { --inset: 50px; }
+
+/* ---------- v1.8: "Forgot anything?" swipe deck ---------- */
+.forgot-row { width: 100%; min-height: 64px; margin-top: 16px; border-radius: 16px; border: 1px solid #2c2c2e; background: var(--bg-elev); display: flex; align-items: center; gap: 12px; padding: 0 14px; text-align: left; }
+.forgot-row:active { background: var(--bg-elev2); }
+.forgot-icon { width: 36px; height: 36px; border-radius: 50%; background: var(--tint); color: #000; display: grid; place-items: center; flex: none; }
+.forgot-icon svg { width: 20px; height: 20px; }
+.forgot-text { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.forgot-text b { font-size: 15px; font-weight: 600; }
+.forgot-text span { font-size: 13px; color: var(--label2); }
+.forgot-row .chev { color: var(--label3); width: 9px; }
+body.simple .forgot-icon { display: none; }
+
+.deck { margin-top: 18px; display: flex; flex-direction: column; gap: 12px; }
+.deck-head { display: flex; justify-content: space-between; align-items: center; min-height: 28px; }
+.deck-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.deck-meta { display: flex; align-items: center; gap: 12px; font-size: 14px; color: var(--label2); }
+.deck-undo { min-height: 44px; margin: -8px 0; padding: 0 6px; color: var(--tint); font-size: 14px; font-weight: 500; }
+.deck-undo.center { display: block; margin: 8px auto -8px; }
+.deck-stage { position: relative; height: 286px; touch-action: pan-y; outline: none; }
+.deck-stage:focus-visible { outline: 2px solid var(--tint); outline-offset: 4px; border-radius: 22px; }
+.deck-back { position: absolute; box-sizing: border-box; border-radius: 20px; border: 1px solid #2c2c2e; }
+.deck-back.b2 { left: 28px; right: 28px; top: 0; height: 250px; background: #121214; }
+.deck-back.b1 { left: 14px; right: 14px; top: 10px; height: 260px; background: #17171a; }
+.deck-card {
+  position: absolute; left: 0; right: 0; top: 22px; height: 264px; box-sizing: border-box; border-radius: 20px;
+  background: var(--bg-elev); border: 1px solid #3a3a3c; touch-action: pan-y; cursor: grab;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center;
+  transform-origin: 50% 100%; will-change: transform; transition: transform 0.2s var(--spring), opacity 0.24s;
+}
+.deck-card:active { cursor: grabbing; }
+.deck-card.lean-need { border: 2px solid var(--tint); }
+.deck-card.lean-have { border: 2px solid #d1d1d6; }
+.deck-icon { width: 96px; height: 96px; border-radius: 50%; background: var(--bg-elev2); display: grid; place-items: center; font-size: 52px; line-height: 1; }
+.deck-name { font-size: 26px; line-height: 32px; font-weight: 700; padding: 0 16px; }
+.deck-last { font-size: 15px; line-height: 20px; color: #d1d1d6; }
+.deck-usually { font-size: 13px; line-height: 18px; color: var(--label2); margin-top: -8px; }
+.stamp { position: absolute; top: 20px; padding: 2px 12px; border: 3px solid; border-radius: 8px; font-size: 20px; line-height: 26px; font-weight: 800; letter-spacing: 0.06em; opacity: 0; pointer-events: none; }
+.stamp.need { left: 20px; color: var(--tint); transform: rotate(-12deg); }
+.stamp.have { right: 20px; color: #d1d1d6; transform: rotate(12deg); }
+.deck-actions { display: flex; gap: 12px; }
+.deck-btn { flex: 1; min-height: 52px; border-radius: 14px; font-size: 16px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px; transition: transform 0.1s; }
+.deck-btn:active { transform: scale(0.98); }
+.deck-btn.have { border: 1px solid #3a3a3c; background: var(--bg-elev); }
+.deck-btn.need { background: var(--tint); color: #000; }
+body.simple .deck-icon { display: none; }
+
+.deck-done { margin-top: 18px; background: var(--bg-elev); border-radius: 20px; padding: 24px 20px 20px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+.deck-done h2 { margin: 0; font-size: 22px; line-height: 28px; font-weight: 700; }
+.deck-done p { margin: -10px 0 0; font-size: 14px; color: var(--label2); }
+.done-check { width: 48px; height: 48px; border-radius: 50%; background: var(--tint); color: #000; display: grid; place-items: center; }
+.done-check svg { width: 26px; height: 26px; }
+.done-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.done-chips span { min-height: 32px; padding: 0 12px; border-radius: 16px; background: var(--bg-elev2); font-size: 14px; display: inline-flex; align-items: center; }
+.deck-done .btn { margin-top: 2px; }
+.deck-suggest { margin-top: 16px; display: flex; flex-direction: column; gap: 12px; }
+.deck-suggest b { display: block; font-size: 15px; font-weight: 600; }
+.deck-suggest span { font-size: 13px; color: var(--label2); }
+.deck-suggest-btns { display: flex; gap: 8px; }
+.btn-outline, .btn-plain { min-height: 44px; border-radius: 12px; font-size: 14px; font-weight: 600; }
+.btn-outline { flex: 1.2; border: 1px solid var(--tint); color: var(--tint); }
+.btn-plain { flex: 1; background: var(--bg-elev2); }

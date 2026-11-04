@@ -118,6 +118,35 @@ export function boughtToday() {
 
 // ---------- mutations ----------
 
+// ---------- "Forgot anything?" deck ----------
+// Each returns what undoDeckAnswer needs to put the item back exactly as it was.
+
+export function deckNeed(id) {
+  const it = store.data.items[id];
+  const prev = { needed: !!it.needed, haveStreak: it.haveStreak || 0 };
+  putItem(id, { needed: true, haveStreak: 0 }); // a flag, so asking twice can never list it twice
+  emit(true);
+  return prev;
+}
+
+export function deckHave(id, snoozeDays) {
+  const it = store.data.items[id];
+  const prev = { snoozedUntil: it.snoozedUntil || null, haveStreak: it.haveStreak || 0 };
+  putItem(id, { snoozedUntil: Date.now() + snoozeDays * DAY, haveStreak: prev.haveStreak + 1 });
+  emit(true);
+  return prev;
+}
+
+export function undoDeckAnswer(id, prev) {
+  if (store.data.items[id]) putItem(id, prev);
+  emit(true);
+}
+
+export function resetHaveStreak(id) {
+  putItem(id, { haveStreak: 0 });
+  emit(true);
+}
+
 export function markBought(id) {
   const item = store.data.items[id];
   const pid = uid('p_');
@@ -129,7 +158,7 @@ export function markBought(id) {
     prevNeeded: !!item.needed,
     prevSnooze: item.snoozeUntil || null,
   });
-  putItem(id, { needed: false, snoozeUntil: null });
+  putItem(id, { needed: false, snoozeUntil: null, snoozedUntil: null, haveStreak: 0 });
   emit(true);
   return pid;
 }
@@ -143,7 +172,7 @@ export function undoPurchase(pid) {
 }
 
 export function setNeeded(id, needed) {
-  putItem(id, { needed, snoozeUntil: needed ? null : store.data.items[id].snoozeUntil });
+  putItem(id, { needed, snoozeUntil: needed ? null : store.data.items[id].snoozeUntil, ...(needed ? { haveStreak: 0 } : {}) });
   emit(true);
 }
 
