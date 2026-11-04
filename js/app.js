@@ -53,7 +53,6 @@ const onListKind = (k) => k === 'needed' || k === 'due';
 const listMode = () => store.device.listView || 'grid';
 const itemsMode = () => store.device.itemsView || 'list';
 const mealsMode = () => store.device.mealsView || 'list';
-const meterColor = (l) => (l > 0.5 ? 'var(--green)' : l > 0.2 ? 'var(--orange)' : 'var(--red)');
 
 function groupByCategory(entries) {
   const groups = new Map(S.categories().map((c) => [c.id, []]));
@@ -75,16 +74,23 @@ function collapsed(scope) {
 function setCollapsed(scope, ids) {
   S.saveDevice({ collapsed: { ...(store.device.collapsed || {}), [scope]: [...ids] } });
 }
-function catSection(scope, cat, count, body, open = false) {
+function catSection(scope, cat, count, body, open = false, due = 0) {
   const closed = !open && collapsed(scope).has(cat);
-  return `<button class="section-header collapsible ${closed ? 'closed' : ''}" data-act="togglecat" data-scope="${scope}" data-c="${cat}">
-      <span class="cat-head"><span class="caret-icon">${icons.chevron}</span>${esc(catName(cat))}</span><span class="count">${count}</span></button>
+  return `<button class="section-header collapsible ${closed ? 'closed' : ''}" aria-expanded="${!closed}" data-act="togglecat" data-scope="${scope}" data-c="${cat}">
+      <span class="cat-head"><span class="caret-icon">${icons.chevron}</span>${esc(catName(cat))}</span>
+      ${due > 0 ? `<span class="due-badge">${due} due</span>` : ''}<span class="count">${count}</span></button>
     ${closed ? '' : body}`;
 }
 function collapseBar(scope, cats, label) {
   const c = collapsed(scope);
   const allClosed = cats.length && cats.every((id) => c.has(id));
   return `<div class="collapse-bar"><span>${label}</span><button data-act="collapseall" data-scope="${scope}" data-cats="${cats.join(',')}">${allClosed ? 'Expand all' : 'Collapse all'}</button></div>`;
+}
+
+function chipRow(list, current, act, style = '') {
+  return `<div class="filter-tabs" ${style ? `style="${style}"` : ''}>${list
+    .map(([k, l]) => `<button aria-pressed="${current === k}" class="${current === k ? 'on' : ''}" data-act="${act}" data-f="${k}"><span>${l}</span></button>`)
+    .join('')}</div>`;
 }
 
 function swipeRow(inner, act, id, label, cls = '') {
@@ -120,9 +126,12 @@ function fmtAgo(t) {
 
 // Fraction of stock estimated left (1 = just bought, 0 = should be out).
 function stockLevel(st) {
-  if (st.interval == null || st.dueAt == null) return null;
-  return Math.min(1, Math.max(0, (st.dueAt - Date.now()) / (st.interval * DAY)));
+  if (st.cycleDays == null || st.daysLeft == null) return null;
+  return Math.min(1, Math.max(0, st.daysLeft / st.cycleDays));
 }
+// Amber at 1 day or less, green otherwise (the text beside it says the same in words).
+const barColor = (st) => (st.daysLeft != null && st.daysLeft <= 1 ? 'var(--orange)' : 'var(--green)');
+const barLabel = (st) => `${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left of ${Math.round(st.cycleDays)}`;
 
 function computeList() {
   const all = S.items().map((item) => ({ item, st: S.status(item) }));
@@ -490,11 +499,51 @@ function setupDeckGestures() {
 
 // ---------- items ----------
 
+const ITEM_FILTERS = [['all', 'All'], ['regular', 'Regular'], ['asneeded', 'As needed'], ['due', 'Due soon'], ['inlist', 'In list']];
+
+function itemRow(item, st) {
+  const inList = st.state === 'in_list';
+  const asNeeded = st.state === 'as_needed' || item.mode === 'none';
+  // The right-hand control: add button, or a green check with "In list". Never both.
+  const action = inList
+    ? `<button class="inlist" data-act="unneed" data-id="${item.id}" aria-label="${esc(item.name)} is in your list. Tap to remove it.">${icons.check}In list</button>`
+    : `<button class="icon-btn" data-act="need" data-id="${item.id}" aria-label="Add ${esc(item.name)} to list">${icons.plusCircle}</button>`;
+
+  if (itemsMode() === 'compact') {
+    const due = inList || asNeeded || st.daysLeft == null ? '' : `${st.daysLeft}d`;
+    return swipeRow(`<div class="row compact swipe-content">
+      <button class="body" data-act="detail" data-id="${item.id}"><div class="title">${esc(item.name)}</div></button>
+      <span class="detail small">${due}</span>${action}</div>`, 'delitem', item.id, 'Delete');
+  }
+  let sub;
+  if (asNeeded) sub = `as needed · ${st.daysSinceBought == null ? 'Not bought yet' : 'Last bought ' + formatAgo(st.daysSinceBought)}`;
+  else if (inList) sub = freqShort(st, item);
+  else sub = `${freqShort(st, item)} · ${dueLabel(st)}`;
+  const lvl = asNeeded || inList ? null : stockLevel(st);
+  return swipeRow(`<div class="row swipe-content">
+    <span class="item-icon">${itemIcon(item)}</span>
+    <button class="body" data-act="detail" data-id="${item.id}">
+      <div class="title">${esc(item.name)}</div>
+      <div class="sub">${sub}</div>
+      ${lvl != null ? `<div class="mini-meter" role="img" aria-label="${barLabel(st)}"><div style="width:${Math.round(lvl * 100)}%;background:${barColor(st)}"></div></div>` : ''}
+    </button>${action}</div>`, 'delitem', item.id, 'Delete');
+}
+
+function reviewStrip(n) {
+  return `<div class="review-strip">
+    <span class="review-icon">${icons.clock}</span>
+    <div class="review-text"><b>${n} item${n === 1 ? '' : 's'} due this week</b><span>Check before your next trip</span></div>
+    <button class="review-btn" data-act="review">Review</button></div>`;
+}
+
 function itemsResults() {
   const q = norm(ui.query.trim());
-  let entries = S.items().map((item) => ({ item, st: S.status(item) }));
+  const all = S.items().map((item) => ({ item, st: S.status(item) }));
+  let entries = all;
   if (ui.filter === 'regular') entries = entries.filter((e) => e.item.mode !== 'none');
   if (ui.filter === 'asneeded') entries = entries.filter((e) => e.item.mode === 'none');
+  if (ui.filter === 'due') entries = entries.filter((e) => e.st.state === 'due_soon');
+  if (ui.filter === 'inlist') entries = entries.filter((e) => e.st.state === 'in_list');
   if (q) entries = entries.filter((e) => norm(e.item.name).includes(q) || norm(catName(e.item.cat)).includes(q));
 
   if (!entries.length) {
@@ -503,45 +552,18 @@ function itemsResults() {
   }
   const groups = groupByCategory(entries);
   let html = q ? '' : collapseBar('itemsC', groups.map(([c]) => c), `${entries.length} items`);
+  const due = deckCandidates(all).regular.length; // the same items the Review deck will ask about
+  if (due > 0 && ui.filter !== 'asneeded') html += reviewStrip(due);
   for (const [cat, list] of groups) {
-    let body = `<div class="group">`;
-    for (const { item, st } of list.sort(byName)) {
-      const on = onListKind(st.kind);
-      const lvl = stockLevel(st);
-      const addBtn = `<button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>`;
-      if (itemsMode() === 'compact') {
-        const due = st.kind === 'needed' ? '' : st.daysLeft == null ? '' : st.daysLeft <= 0 ? '<span class="due">due</span>' : `${st.daysLeft}d`;
-        body += swipeRow(`<div class="row compact swipe-content">
-          <button class="body" data-act="detail" data-id="${item.id}"><div class="title">${esc(item.name)}</div></button>
-          <span class="detail small">${due}</span>${addBtn}</div>`, 'delitem', item.id, 'Delete');
-        continue;
-      }
-      body += swipeRow(`<div class="row swipe-content">
-        <span class="item-icon">${itemIcon(item)}</span>
-        <button class="body" data-act="detail" data-id="${item.id}">
-          <div class="title">${esc(item.name)}</div>
-          <div class="sub">${freqShort(st, item)}${st.daysLeft != null && st.kind !== 'needed' ? ' · ' + dueLabel(st) : ''}</div>
-          ${lvl != null && !on ? `<div class="mini-meter"><div style="width:${Math.round(lvl * 100)}%;background:${meterColor(lvl)}"></div></div>` : ''}
-        </button>
-        <button class="icon-btn ${on ? 'on' : ''}" data-act="${on ? 'unneed' : 'need'}" data-id="${item.id}" aria-label="${on ? 'On list' : 'Add to list'}">${on ? icons.checkCircle : icons.plusCircle}</button>
-      </div>`, 'delitem', item.id, 'Delete');
-    }
-    html += catSection('itemsC', cat, list.length, body + `</div>`, !!q);
+    const body = `<div class="group">${list.sort(byName).map((e) => itemRow(e.item, e.st)).join('')}</div>`;
+    html += catSection('itemsC', cat, list.length, body, !!q, list.filter((e) => e.st.state === 'due_soon').length);
   }
   return html;
 }
 
 function itemsView() {
   return `<label class="search">${icons.search}<input id="itemsearch" type="text" placeholder="Search items" value="${esc(ui.query)}" autocomplete="off" autocorrect="off"></label>
-    <div class="filter-tabs" style="margin-top:10px">
-      ${[
-        ['all', 'All'],
-        ['regular', 'Regular'],
-        ['asneeded', 'As needed'],
-      ]
-        .map(([k, l]) => `<button class="${ui.filter === k ? 'on' : ''}" data-act="filter" data-f="${k}">${l}</button>`)
-        .join('')}
-    </div>
+    ${chipRow(ITEM_FILTERS, ui.filter, 'filter', 'margin-top:6px')}
     <div id="itemsresults">${itemsResults()}</div>`;
 }
 
@@ -844,7 +866,7 @@ function itemDetail(id) {
           <div class="status-card ${st.kind}">
             <div class="status-title">${statusTitle}</div>
             <div class="status-sub">${statusSub}</div>
-            ${lvl != null ? `<div class="meter"><div style="width:${Math.round(lvl * 100)}%;background:${meterColor(lvl)}"></div></div><div class="meter-cap"><span>Empty</span><span>~${Math.round(lvl * 100)}% left</span><span>Full</span></div>` : ''}
+            ${lvl != null ? `<div class="meter"><div style="width:${Math.round(lvl * 100)}%;background:${barColor(st)}"></div></div><div class="meter-cap"><span>Empty</span><span>~${Math.round(lvl * 100)}% left</span><span>Full</span></div>` : ''}
           </div>
 
           <div class="action-row">
@@ -1809,6 +1831,14 @@ function onAction(e) {
       if (!c.length) return;
       ui.deck = newDeck(c.map((e) => e.item.id));
       render();
+      return $('.deck')?.scrollIntoView({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    }
+    case 'review': {
+      const c = deckCandidates(computeList().all).deck;
+      if (!c.length) return;
+      ui.deck = newDeck(c.map((e) => e.item.id));
+      ui.autoDeckOff = false;
+      switchTab('list');
       return $('.deck')?.scrollIntoView({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
     }
     case 'deckneed':

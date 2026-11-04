@@ -471,8 +471,9 @@ textarea.code { width: 100%; min-height: 88px; background: var(--bg-elev2); bord
 
 .filter-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 0 -16px; padding: 2px 16px 4px; scrollbar-width: none; }
 .filter-tabs::-webkit-scrollbar { display: none; }
-.filter-tabs button { flex: none; padding: 7px 14px; border-radius: 99px; background: var(--fill); font-size: 14px; font-weight: 500; color: var(--label2); transition: background 0.15s; }
-.filter-tabs button.on { background: var(--label); color: #000; font-weight: 600; }
+.filter-tabs button { flex: none; min-height: 44px; padding: 0; display: flex; align-items: center; background: none; }
+.filter-tabs button span { display: flex; align-items: center; height: 34px; padding: 0 16px; border-radius: 17px; background: var(--fill); font-size: 14px; font-weight: 600; color: #c7c7cc; transition: background 0.15s; }
+.filter-tabs button.on span { background: #fff; color: #000; }
 .plus-dot { width: 22px; height: 22px; border-radius: 50%; background: var(--tint-soft); color: var(--tint); display: grid; place-items: center; flex: none; }
 .plus-dot svg { width: 13px; height: 13px; stroke-width: 3; }
 .rhythm-card { min-height: 52px; justify-content: center; }
@@ -619,3 +620,20 @@ body.simple .deck-icon { display: none; }
 .btn-outline, .btn-plain { min-height: 44px; border-radius: 12px; font-size: 14px; font-weight: 600; }
 .btn-outline { flex: 1.2; border: 1px solid var(--tint); color: var(--tint); }
 .btn-plain { flex: 1; background: var(--bg-elev2); }
+
+/* ---------- v1.8: Items page ---------- */
+.section-header.collapsible { min-height: 48px; padding: 0 4px; margin: 4px 0 0; display: flex; align-items: center; gap: 8px; width: 100%; }
+.due-badge { height: 22px; padding: 0 8px; border-radius: 11px; background: #2a2110; color: var(--orange); font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; display: inline-flex; align-items: center; }
+.section-header.collapsible .count { min-width: 28px; text-align: right; }
+.section-header.collapsible .cat-head { flex: 1; min-width: 0; }
+.inlist { min-height: 44px; padding: 0 10px 0 4px; display: flex; align-items: center; gap: 4px; color: var(--tint); font-size: 13px; font-weight: 600; flex: none; }
+.inlist svg { width: 16px; height: 16px; }
+.inlist svg { color: var(--tint); stroke: var(--tint); }
+.review-strip { margin: 8px 0 4px; min-height: 64px; border-radius: 16px; background: var(--bg-elev); display: flex; align-items: center; gap: 12px; padding: 0 10px 0 14px; }
+.review-icon { width: 36px; height: 36px; border-radius: 50%; background: #2a2110; color: var(--orange); display: grid; place-items: center; flex: none; }
+.review-icon svg { width: 20px; height: 20px; }
+.review-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.review-text b { font-size: 15px; font-weight: 600; }
+.review-text span { font-size: 13px; color: var(--label2); }
+.review-btn { min-height: 44px; padding: 0 16px; border-radius: 22px; background: var(--tint); color: #000; font-size: 14px; font-weight: 600; flex: none; }
+body.simple .review-icon { display: none; }
