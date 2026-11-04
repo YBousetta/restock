@@ -7,6 +7,7 @@ import {
 } from './deck.js';
 import { CATEGORY_ICONS, CATEGORY_RHYTHM, ICON_CHOICES, MEAL_CATEGORIES, MEAL_IDEAS, NON_FOOD, guessItemIcon, guessCategory } from './knowledge.js';
 import { esc, $, toast, openSheet, sheetHeader, actionSheet, confirmAction, enableSwipe, passcodeSheet } from './ui.js';
+import { mealReadiness, lowNames } from './meals.js';
 import { syncState, onSyncChange, startSync, syncNow, connect, disconnect, inviteCode, parseInvite } from './sync.js';
 
 const VERSION = '1.8.0';
@@ -569,25 +570,28 @@ function itemsView() {
 
 // ---------- meals ----------
 
+const mealCatOf = (m) => (MEAL_CATEGORIES.some(([k]) => k === m.category) ? m.category : 'other');
+const mealIcon = (cat) => MEAL_CATEGORIES.find(([k]) => k === cat)?.[2] || '🍽️';
+const mealInfo = (m) => mealReadiness(m, store.data.items, (it) => S.status(it));
+
 function mealsView() {
   const meals = S.live(store.data.meals);
   const names = new Set(meals.map((m) => m.name.toLowerCase()));
   const f = ui.mealFilter;
-  const tabs = [['all', 'All'], ...MEAL_CATEGORIES.map(([k, l]) => [k, l])];
-  let html = `<div class="filter-tabs">${tabs
-    .map(([k, l]) => `<button class="${f === k ? 'on' : ''}" data-act="mealfilter" data-f="${k}">${l}</button>`)
-    .join('')}</div>`;
-  const cats = f === 'all' ? [...MEAL_CATEGORIES, ['other', 'Other']] : MEAL_CATEGORIES.filter(([k]) => k === f);
+  const tabs = [['all', 'All'], ['ready', 'Can cook now'], ...MEAL_CATEGORIES.map(([k, l]) => [k, l])];
+  let html = chipRow(tabs, f, 'mealfilter');
+  const grouped = f === 'all' || f === 'ready'; // grouped by meal type, no ideas
+  const cats = grouped ? [...MEAL_CATEGORIES, ['other', 'Other']] : MEAL_CATEGORIES.filter(([k]) => k === f);
   let any = false;
   for (const [k, label] of cats) {
-    const mine = meals.filter((m) => mealCatOf(m) === k).sort((a, b) => a.name.localeCompare(b.name));
+    let mine = meals.filter((m) => mealCatOf(m) === k).sort((a, b) => a.name.localeCompare(b.name));
+    if (f === 'ready') mine = mine.filter((m) => mealInfo(m).ready);
     if (mine.length) {
       any = true;
-      if (f === 'all') html += `<div class="section-header">${label}</div>`;
-      else html += `<div style="height:14px"></div>`;
+      html += grouped ? `<div class="section-header">${label}</div>` : `<div style="height:14px"></div>`;
       html += `<div class="group">${mine.map(mealRow).join('')}</div>`;
     }
-    if (f !== 'all') {
+    if (!grouped) {
       const ideas = (MEAL_IDEAS[k] || []).map((x, i) => [x[0], i]).filter(([n]) => !names.has(n.toLowerCase()));
       if (ideas.length) {
         any = true;
@@ -597,31 +601,41 @@ function mealsView() {
       }
     }
   }
-  if (!any) html += `<div class="empty"><h3>No meals yet</h3><button class="btn secondary" data-act="newmeal" data-cat="${f}" style="margin-top:12px">New meal</button></div>`;
+  if (!any && f === 'ready') html += `<div class="empty"><h3>Nothing ready to cook</h3></div>`;
+  else if (!any) html += `<div class="empty"><h3>No meals yet</h3><button class="btn secondary" data-act="newmeal" data-cat="${f}" style="margin-top:12px">New meal</button></div>`;
   return html;
 }
 
-const mealCatOf = (m) => (MEAL_CATEGORIES.some(([k]) => k === m.category) ? m.category : 'other');
-const mealIcon = (cat) => MEAL_CATEGORIES.find(([k]) => k === cat)?.[2] || '🍽️';
-
 function mealRow(m) {
-  const ings = (m.items || []).map((id) => store.data.items[id]).filter((i) => i && !i.deleted);
-  const low = ings.filter((i) => ['needed', 'due', 'soon'].includes(S.status(i).kind)).length;
+  const r = mealInfo(m);
   if (mealsMode() === 'compact') {
-    const r = `<button class="row tappable compact swipe-content" data-act="meal" data-id="${m.id}">
+    const row = `<button class="row tappable compact swipe-content" data-act="meal" data-id="${m.id}">
       <div class="body"><div class="title">${esc(m.name)}</div></div>
-      <span class="detail small">${low ? `<span class="soon">${low} low</span> · ` : ''}${ings.length}</span><span class="chev">${icons.chevron}</span></button>`;
-    return swipeRow(r, 'delmeal', m.id, 'Delete');
+      <span class="detail small">${r.low.length ? `<span class="soon">Low ${r.low.length}</span> · ` : ''}${r.total}</span><span class="chev">${icons.chevron}</span></button>`;
+    return swipeRow(row, 'delmeal', m.id, 'Delete');
   }
-  const row = `<button class="row tappable swipe-content" data-act="meal" data-id="${m.id}">
-    <div class="body"><div class="title">${esc(m.name)}</div>
-    <div class="sub">${ings.length} ingredient${ings.length === 1 ? '' : 's'}${low ? ` · <span class="soon">${low} low</span>` : ''}</div></div>
-    <span class="chev">${icons.chevron}</span></button>`;
+  // one bar segment per ingredient, green (in stock) first, then amber (low)
+  const have = r.total - r.low.length;
+  const segs = [...Array(have).fill('var(--green)'), ...Array(r.low.length).fill('var(--orange)')];
+  const bar = r.total
+    ? `<div class="meal-bar" role="img" aria-label="${have} of ${r.total} ingredients in stock">${segs.map((c) => `<i style="background:${c}"></i>`).join('')}</div>`
+    : '';
+  const status = !r.total
+    ? `<span>No ingredients yet</span>`
+    : r.ready
+      ? `<b class="ok">Ready to cook</b>`
+      : `<b class="low">Low ${r.low.length}</b><span> · ${esc(lowNames(r.low))}</span>`;
+  const action = r.addable.length
+    ? `<button class="meal-add" data-act="mealadd" data-id="${m.id}" aria-label="Add ${r.addable.length} low ingredient${r.addable.length === 1 ? '' : 's'} for ${esc(m.name)} to the shopping list"><span>${icons.plus}Add ${r.addable.length}</span></button>`
+    : r.allListed
+      ? `<span class="inlist static">${icons.check}In list</span>`
+      : r.ready
+        ? `<span class="meal-ready" aria-hidden="true">${icons.checkCircle}</span>`
+        : '';
+  const row = `<div class="row meal-row swipe-content">
+    <button class="meal-main" data-act="meal" data-id="${m.id}"><span class="meal-name">${esc(m.name)}</span>${bar}<span class="meal-status">${status}</span></button>${action}</div>`;
   return swipeRow(row, 'delmeal', m.id, 'Delete');
 }
-
-
-
 
 // ---------- settings ----------
 
@@ -1812,8 +1826,14 @@ function onAction(e) {
     case 'meal':
       return mealSheet(id);
     case 'newmeal': {
-      const c = b.dataset.cat || (ui.mealFilter !== 'all' ? ui.mealFilter : null);
-      return mealWizard({ cat: c && c !== 'all' && c !== 'other' ? c : null });
+      const c = b.dataset.cat || ui.mealFilter;
+      return mealWizard({ cat: MEAL_CATEGORIES.some(([k]) => k === c) ? c : null });
+    }
+    case 'mealadd': {
+      const meal = store.data.meals[id];
+      const ids = mealInfo(meal).addable.map((i) => i.item.id); // only the ones not on the list yet
+      ids.forEach((x) => S.setNeeded(x, true)); // a flag per item, so nothing can be listed twice
+      return toast(`${ids.length} item${ids.length === 1 ? '' : 's'} added for ${meal.name}`, { undo: () => ids.forEach((x) => S.setNeeded(x, false)) });
     }
     case 'togglecat': {
       const set = collapsed(b.dataset.scope);

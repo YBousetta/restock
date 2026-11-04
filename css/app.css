@@ -637,3 +637,21 @@ body.simple .deck-icon { display: none; }
 .review-text span { font-size: 13px; color: var(--label2); }
 .review-btn { min-height: 44px; padding: 0 16px; border-radius: 22px; background: var(--tint); color: #000; font-size: 14px; font-weight: 600; flex: none; }
 body.simple .review-icon { display: none; }
+
+/* ---------- v1.8: Meals page ---------- */
+.meal-row { padding: 0 4px 0 0; align-items: center; gap: 8px; }
+.meal-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px 0 14px 14px; text-align: left; }
+.meal-name { font-size: 16px; line-height: 20px; font-weight: 600; }
+.meal-bar { display: flex; gap: 3px; }
+.meal-bar i { flex: 1; height: 4px; border-radius: 2px; }
+.meal-status { font-size: 12px; line-height: 16px; color: var(--label2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meal-status b { font-weight: 600; }
+.meal-status b.low { color: var(--orange); }
+.meal-status b.ok { color: var(--green); }
+.meal-add { min-height: 44px; padding: 0 6px 0 0; flex: none; }
+.meal-add span { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 12px; border-radius: 17px; background: var(--bg-elev2); font-size: 14px; font-weight: 600; }
+.meal-add svg { width: 14px; height: 14px; stroke-width: 2.6; }
+.meal-add:active span { background: var(--bg-elev3); }
+.inlist.static { padding-right: 10px; }
+.meal-ready { width: 44px; height: 44px; display: grid; place-items: center; color: var(--tint); flex: none; }
+.meal-ready svg { width: 22px; height: 22px; }
